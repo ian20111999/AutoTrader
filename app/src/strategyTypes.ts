@@ -15,3 +15,11 @@ export interface StrategyInfo {
   name: string;
   params: StrategyParam[];
 }
+
+// 3.5 調參頁面套用後的結果：選了哪個策略、每個參數欄位目前的值（未轉型的原始
+// 字串，跟 StrategyParam.default 一樣）。3.6 回測頁面會讀這個狀態決定要跑哪組
+// 參數，所以放在 App.tsx 這一層，兩個分頁都能存取。
+export interface StrategyConfig {
+  strategyId: string;
+  values: Record<string, string>;
+}

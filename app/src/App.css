@@ -10,6 +10,8 @@
   --text-muted: #7f8898;
   --accent: #f2b33d;
   --accent-hover: #ffd27a;
+  --bg-raised: #181d26;
+  --danger: #f4555e;
 
   font-family: "IBM Plex Sans", "Noto Sans TC", sans-serif;
   font-size: 16px;
@@ -148,6 +150,9 @@ a:hover {
 /* 策略庫 */
 
 .strategy-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 16px;
@@ -157,16 +162,12 @@ a:hover {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
+  gap: 10px;
   box-sizing: border-box;
   padding: 16px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 10px;
-  color: var(--text-primary);
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
 }
 
 .strategy-card:hover {
@@ -178,6 +179,21 @@ a:hover {
   border-color: var(--accent);
 }
 
+.strategy-card__select {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: var(--text-primary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .strategy-card__name {
   font-size: 15px;
   font-weight: 600;
@@ -186,4 +202,100 @@ a:hover {
 .strategy-card__params {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.strategy-card__edit {
+  align-self: flex-start;
+  min-height: 32px;
+  padding: 0 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.strategy-card__edit:hover {
+  border-color: var(--accent);
+}
+
+/* 策略調參表單 */
+
+.strategy-param-form {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 16px;
+  max-width: 420px;
+}
+
+.strategy-param-form h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.strategy-param-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.strategy-param-form__field label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.strategy-param-form__field input {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.strategy-param-form__field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.strategy-param-form__field input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.strategy-param-form__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.strategy-param-form__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.strategy-param-form__apply {
+  min-height: 36px;
+  padding: 0 16px;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #1a1405;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.strategy-param-form__apply:hover {
+  background: var(--accent-hover);
 }
