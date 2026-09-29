@@ -35,7 +35,7 @@ pub use donchian::Donchian;
 pub use rsi::Rsi;
 pub use sma_cross::SmaCross;
 
-use crate::fixed::Fixed;
+use crate::fixed::{isqrt, Fixed};
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -70,26 +70,6 @@ impl fmt::Display for StrategyParamError {
 }
 
 impl std::error::Error for StrategyParamError {}
-
-/// 整數平方根，往下取整。
-///
-/// 標準庫的 `u128::isqrt` 要 Rust 1.84，本專案宣告的 `rust-version` 是 1.80，
-/// 所以自己寫一個牛頓法版本。
-fn isqrt(n: u128) -> u128 {
-    if n < 2 {
-        return n;
-    }
-    // 初始猜測取 2^ceil(位數/2)，一定 ≥ √n，之後單調遞減收斂
-    let bits = 128 - n.leading_zeros();
-    let mut x = 1u128 << bits.div_ceil(2);
-    loop {
-        let next = (x + n / x) / 2;
-        if next >= x {
-            return x;
-        }
-        x = next;
-    }
-}
 
 /// 固定長度的滑動視窗，附帶移動總和。
 ///
@@ -302,19 +282,6 @@ mod tests {
             w.push(fx(v));
         }
         w
-    }
-
-    #[test]
-    fn isqrt_matches_hand_calculation() {
-        assert_eq!(isqrt(0), 0);
-        assert_eq!(isqrt(1), 1);
-        assert_eq!(isqrt(3), 1);
-        assert_eq!(isqrt(4), 2);
-        assert_eq!(isqrt(5), 2);
-        assert_eq!(isqrt(10_000), 100);
-        // 10^16 開根號剛好是 10^8，這是標準差換算用到的尺度
-        assert_eq!(isqrt(10_u128.pow(16)), 100_000_000);
-        assert_eq!(isqrt(u128::MAX), (1_u128 << 64) - 1);
     }
 
     #[test]

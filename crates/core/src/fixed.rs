@@ -156,6 +156,29 @@ impl Fixed {
     }
 }
 
+/// 整數開根號（往下取整）：`isqrt(9) == 3`、`isqrt(10) == 3`。
+///
+/// 標準庫的 `u128::isqrt` 要 Rust 1.84，本專案宣告的 `rust-version` 是 1.80，
+/// 所以自己寫一個牛頓法版本。放在這裡是因為它是**定點數的整數運算**，
+/// 策略的標準差（`strategies::Window::stddev`）與績效指標的夏普比率
+/// （`metrics`）都要用，兩邊的縮放倍數不同，所以共用的是這個純整數版本，
+/// 不是某個包好的 `Fixed::sqrt`。
+pub(crate) fn isqrt(n: u128) -> u128 {
+    if n < 2 {
+        return n;
+    }
+    // 初始猜測取 2^ceil(位數/2)，一定 ≥ √n，之後單調遞減收斂
+    let bits = 128 - n.leading_zeros();
+    let mut x = 1u128 << bits.div_ceil(2);
+    loop {
+        let next = (x + n / x) / 2;
+        if next >= x {
+            return x;
+        }
+        x = next;
+    }
+}
+
 impl FromStr for Fixed {
     type Err = ParseFixedError;
 
@@ -382,6 +405,19 @@ mod tests {
         assert!(fx("0.03").is_multiple_of(fx("0.01")));
         assert!(!fx("0.035").is_multiple_of(fx("0.01")));
         assert!(Fixed::ZERO.is_multiple_of(fx("0.00001")));
+    }
+
+    #[test]
+    fn isqrt_matches_hand_calculation() {
+        assert_eq!(isqrt(0), 0);
+        assert_eq!(isqrt(1), 1);
+        assert_eq!(isqrt(3), 1);
+        assert_eq!(isqrt(4), 2);
+        assert_eq!(isqrt(5), 2);
+        assert_eq!(isqrt(10_000), 100);
+        // 10^16 開根號剛好是 10^8，這是標準差換算用到的尺度
+        assert_eq!(isqrt(10_u128.pow(16)), 100_000_000);
+        assert_eq!(isqrt(u128::MAX), (1_u128 << 64) - 1);
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //!
 //! 做的事只有四件：把 K 線一根一根餵給策略、按策略要的目標部位調整倉位、
 //! 持倉期間收付資金費、每根收盤記一次帳戶總值。那串總值就是**權益曲線**，
-//! 也是 2.6 績效指標唯一需要的輸入。
+//! 也是 [`crate::metrics::Metrics`] 四個指標唯一需要的輸入。
+//!
+//! 除了曲線，[`BacktestResult`] 還帶兩個曲線裡看不出來的數字：成交筆數與爆倉次數。
 //!
 //! ## 成交時點：決定與成交永遠隔一根（2.3）
 //!
@@ -109,8 +111,6 @@
 //! 用 [`BacktestConfig::frictionless`] 跑同一份資料：它應該完全複製 2.3 的數字。
 //! 槓桿 1 倍、只做多、資金費率 0 時，這一版的算式會退化成 2.4 的算式，
 //! 數字也必須一模一樣（見測試 `unit_leverage_long_only_reproduces_the_2_4_numbers`）。
-//!
-//! 還沒有的是：績效指標（2.6）。
 
 use crate::bar::Bar;
 use crate::fees::FeeModel;
@@ -181,6 +181,28 @@ pub struct EquityPoint {
     pub open_time: i64,
     /// 這根 K 線**收盤時**的帳戶總值 = 現金 + 持倉市值（以收盤價計，可為負數量）。
     pub equity: Fixed,
+}
+
+/// 一次回測的完整結果。
+///
+/// 為什麼不只回權益曲線：**成交筆數與爆倉次數是曲線裡看不出來的資訊**。
+/// 「年化 30%、中途爆倉一次」和「年化 30%、全程沒爆倉」在曲線上可以長得很像
+/// （爆倉後拿殘值重開的固定槓桿策略，和完全沒爆倉只是回撤深一點的策略，
+/// 權益序列可以幾乎一樣），但在報表上是完全不同的兩件事。
+///
+/// 只有回測迴圈知道這兩個數字，在外面重跑一次策略去猜是錯的做法。
+#[derive(Debug, Clone, PartialEq)]
+pub struct BacktestResult {
+    /// 每根 K 線收盤時的帳戶總值。[`crate::metrics::Metrics`] 只吃這個欄位。
+    pub curve: Vec<EquityPoint>,
+    /// 實際送出去的成交筆數。
+    ///
+    /// **強制平倉也算一筆**：它是真的市價單，付了滑價與吃單費。想知道「有幾次
+    /// 是被迫的」看 `liquidations`。同一根 K 線最多算一筆調倉，
+    /// 「目標和現況只差一點成本、放棄調倉」的那種不算（因為真的沒送單）。
+    pub trades: usize,
+    /// 被強制平倉的次數。0 以外的任何數字都該在報表上標出來。
+    pub liquidations: usize,
 }
 
 /// 回測跑不下去的原因。
@@ -288,25 +310,25 @@ fn settle(cash: Fixed, delta: Fixed, price: Fixed, costs: &Costs) -> Option<Fixe
 
 /// 維持保證金檢查：權益掉到「名目金額 × 維持保證金率」以下就被整個平掉。
 ///
-/// 回傳檢查後的（現金, 數量）。`rate` 是 `None` 就完全不檢查。
+/// 回傳檢查後的（現金, 數量, 這次有沒有被平倉）。`rate` 是 `None` 就完全不檢查。
 fn margin_call(
     cash: Fixed,
     qty: Fixed,
     mark: Fixed,
     rate: Option<Fixed>,
     costs: &Costs,
-) -> Option<(Fixed, Fixed)> {
+) -> Option<(Fixed, Fixed, bool)> {
     let Some(rate) = rate else {
-        return Some((cash, qty));
+        return Some((cash, qty, false));
     };
     if qty.is_zero() {
-        return Some((cash, qty));
+        return Some((cash, qty, false));
     }
     let value = qty.checked_mul(mark)?;
     let equity = cash.checked_add(value)?;
     let threshold = value.abs().checked_mul(rate)?;
     if equity > threshold {
-        return Some((cash, qty));
+        return Some((cash, qty, false));
     }
     // 平掉整個倉位：多頭賣出、空頭買回，一樣要付滑價與吃單費。
     let after = settle(cash, Fixed::ZERO.checked_sub(qty)?, mark, costs)?;
@@ -316,7 +338,7 @@ fn margin_call(
     } else {
         after
     };
-    Some((after, Fixed::ZERO))
+    Some((after, Fixed::ZERO, true))
 }
 
 /// 從 `prev`（不含）到 `now`（含）之間跨過幾個資金費結算點。
@@ -326,15 +348,15 @@ fn funding_periods(prev: i64, now: i64) -> i64 {
     now.div_euclid(FUNDING_INTERVAL_MS) - prev.div_euclid(FUNDING_INTERVAL_MS)
 }
 
-/// 跑一次回測，回傳每根 K 線收盤時的權益。
+/// 跑一次回測，回傳權益曲線與成交統計。
 ///
 /// `bars` 要是同一個交易對與週期、時間遞增的連續 K 線（用 [`crate::find_gaps`] 先檢查）。
-/// 空的 `bars` 不是錯誤，回傳空曲線。
+/// 空的 `bars` 不是錯誤，回傳空曲線與 0 筆成交。
 pub fn run_backtest(
     bars: &[Bar],
     strategy: &mut dyn Strategy,
     config: &BacktestConfig,
-) -> Result<Vec<EquityPoint>, BacktestError> {
+) -> Result<BacktestResult, BacktestError> {
     if config.initial_capital <= Fixed::ZERO {
         return Err(BacktestError::NonPositiveCapital);
     }
@@ -390,6 +412,8 @@ pub fn run_backtest(
     // 上一根收盤算出、還沒成交的目標部位。第一根之前沒有目標，所以是 None。
     let mut pending: Option<TargetPosition> = None;
     let mut curve = Vec::with_capacity(bars.len());
+    let mut trades = 0usize;
+    let mut liquidations = 0usize;
 
     for (index, bar) in bars.iter().enumerate() {
         if index > 0 && bar.open_time <= bars[index - 1].open_time {
@@ -419,8 +443,13 @@ pub fn run_backtest(
         }
 
         // ② 強制平倉檢查（開盤價）：先付完資金費才算得準。
-        (cash, qty) = margin_call(cash, qty, bar.open, config.maintenance_margin_rate, &costs)
+        let hit;
+        (cash, qty, hit) = margin_call(cash, qty, bar.open, config.maintenance_margin_rate, &costs)
             .ok_or(BacktestError::Overflow { index })?;
+        if hit {
+            liquidations += 1;
+            trades += 1;
+        }
 
         // ③ 成交上一根留下的目標：用**這根的開盤價**，不是上一根的收盤價。
         let equity_at_open = qty
@@ -469,6 +498,7 @@ pub fn run_backtest(
                     cash = settle(cash, delta, bar.open, &costs)
                         .ok_or(BacktestError::Overflow { index })?;
                     qty = want;
+                    trades += 1;
                 }
             }
         }
@@ -478,8 +508,13 @@ pub fn run_backtest(
         if price <= Fixed::ZERO {
             return Err(BacktestError::NonPositivePrice { index });
         }
-        (cash, qty) = margin_call(cash, qty, price, config.maintenance_margin_rate, &costs)
+        let hit;
+        (cash, qty, hit) = margin_call(cash, qty, price, config.maintenance_margin_rate, &costs)
             .ok_or(BacktestError::Overflow { index })?;
+        if hit {
+            liquidations += 1;
+            trades += 1;
+        }
         let equity = qty
             .checked_mul(price)
             .and_then(|value| cash.checked_add(value))
@@ -497,7 +532,11 @@ pub fn run_backtest(
         pending = Some(strategy.on_bar(bar));
     }
 
-    Ok(curve)
+    Ok(BacktestResult {
+        curve,
+        trades,
+        liquidations,
+    })
 }
 
 #[cfg(test)]
@@ -642,7 +681,11 @@ mod tests {
         // 沒資料不是錯誤，也不能 panic
         assert_eq!(
             run_backtest(&[], &mut AlwaysLong, &frictionless("10000")),
-            Ok(vec![])
+            Ok(BacktestResult {
+                curve: vec![],
+                trades: 0,
+                liquidations: 0,
+            })
         );
     }
 
@@ -653,7 +696,8 @@ mod tests {
             &mut AlwaysFlat,
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(equities(&curve), vec![fx("10000"); 3]);
     }
 
@@ -666,7 +710,8 @@ mod tests {
             &mut AlwaysLong,
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(equities(&curve), vec![fx("10000"), fx("20000")]);
         // 舊模型（本根收盤 125 成交）會買到 10000 ÷ 125 = 80 顆，最後是 80 × 200 = 16000。
         // 兩個答案不同，這條測試才有意義。
@@ -688,7 +733,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 1),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("20000"), fx("15000")]
@@ -699,19 +745,20 @@ mod tests {
     fn a_single_bar_never_trades() {
         // 只有一根：收盤算出的目標沒有下一根可以成交，直接作廢。
         // 所以即使策略喊做多、價格從 100 衝到 500，權益仍然是起始資金（而且不 panic）。
-        let curve = run_backtest(
+        let result = run_backtest(
             &oc_bars(&[("100", "500")]),
             &mut AlwaysLong,
             &frictionless("10000"),
         )
         .unwrap();
         assert_eq!(
-            curve,
+            result.curve,
             vec![EquityPoint {
                 open_time: T0,
                 equity: fx("10000"),
             }]
         );
+        assert_eq!(result.trades, 0);
     }
 
     #[test]
@@ -723,7 +770,8 @@ mod tests {
             &mut AlwaysLong,
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("10000"), fx("11000"), fx("12100")]
@@ -746,7 +794,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 2),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![
@@ -768,7 +817,8 @@ mod tests {
             &mut AlwaysLong,
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(curve[1].equity, fx("10000"));
         // 價格翻倍：3333.33333333 × 6 + 0.00000001 = 19999.99999999
         assert_eq!(curve[2].equity, fx("19999.99999999"));
@@ -844,7 +894,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 1),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("20000"), fx("15000")]
@@ -856,7 +907,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 1),
             &with_costs("10000", "0.0005"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert!(
             with_cost.last().unwrap().equity < fx("15000"),
             "含成本的權益 {} 應該比無成本的 15000 低",
@@ -874,7 +926,9 @@ mod tests {
             slippage: fx("0.0005"),
             ..BacktestConfig::frictionless(fx("10005"))
         };
-        let curve = run_backtest(&bars(&["100", "100"]), &mut AlwaysLong, &cfg).unwrap();
+        let curve = run_backtest(&bars(&["100", "100"]), &mut AlwaysLong, &cfg)
+            .unwrap()
+            .curve;
         assert_eq!(equities(&curve), vec![fx("10005"), fx("10000")]);
     }
 
@@ -887,7 +941,9 @@ mod tests {
             fees: Some(FeeModel::spot_vip0()),
             ..BacktestConfig::frictionless(fx("10010"))
         };
-        let curve = run_backtest(&bars(&["100", "100"]), &mut AlwaysLong, &cfg).unwrap();
+        let curve = run_backtest(&bars(&["100", "100"]), &mut AlwaysLong, &cfg)
+            .unwrap()
+            .curve;
         assert_eq!(equities(&curve), vec![fx("10010"), fx("10000")]);
     }
 
@@ -912,7 +968,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 1),
             &with_costs("10015.005", "0.0005"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10015.005"), fx("10000"), fx("9985.005"), fx("9985.005")]
@@ -942,7 +999,9 @@ mod tests {
             slippage: fx("0.00037"),
             ..BacktestConfig::frictionless(fx("10000"))
         };
-        let curve = run_backtest(&bars(&["3", "3", "3"]), &mut AlwaysLong, &cfg).unwrap();
+        let curve = run_backtest(&bars(&["3", "3", "3"]), &mut AlwaysLong, &cfg)
+            .unwrap()
+            .curve;
         // 買在 3 × 1.00037 = 3.00111，收盤評價回 3，所以權益一定比起始資金低
         assert!(curve[1].equity < fx("10000"));
         // 低的幅度不該超過滑價 + 手續費（10000 × (0.00037 + 0.001) 約 13.7）
@@ -972,7 +1031,8 @@ mod tests {
             &mut NudgeUp(0),
             &with_costs("10000", "0.0005"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         // 第 1 根建了 0.999 倍的倉，第 2、3 根都放棄調倉 → 權益完全不動
         assert_eq!(curve[1].equity, curve[2].equity);
         assert_eq!(curve[2].equity, curve[3].equity);
@@ -1031,7 +1091,8 @@ mod tests {
             boxed.as_mut(),
             &frictionless("1000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(equities(&curve), vec![fx("1000"), fx("1000"), fx("2000")]);
     }
 
@@ -1051,7 +1112,8 @@ mod tests {
             &mut Hold(fx("-1")),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("10000"), fx("15000")]
@@ -1068,7 +1130,8 @@ mod tests {
             &mut Hold(fx("-1")),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(equities(&curve), vec![fx("10000"), fx("10000"), fx("9000")]);
     }
 
@@ -1095,7 +1158,8 @@ mod tests {
             &mut HoldThenFlat::new("-1", 1),
             &cfg,
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(equities(&curve), vec![fx("9995"), fx("9990"), fx("9985")]);
         assert_ne!(curve[2].equity, fx("9995"));
     }
@@ -1121,7 +1185,8 @@ mod tests {
             &mut LongThenShort(0),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         // 第 3 根價格腰斬：空頭賺 5000（第 2 根翻空後的名目金額是 10000）
         assert_eq!(
             equities(&curve),
@@ -1139,13 +1204,17 @@ mod tests {
     #[test]
     fn two_times_leverage_doubles_the_move() {
         let data = oc_bars(&[("100", "100"), ("100", "100"), ("100", "110")]);
-        let levered = run_backtest(&data, &mut Hold(fx("2")), &frictionless("10000")).unwrap();
+        let levered = run_backtest(&data, &mut Hold(fx("2")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(
             equities(&levered),
             vec![fx("10000"), fx("10000"), fx("12000")]
         );
         // 同一份資料、1 倍槓桿只漲 10%
-        let plain = run_backtest(&data, &mut AlwaysLong, &frictionless("10000")).unwrap();
+        let plain = run_backtest(&data, &mut AlwaysLong, &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(plain.last().unwrap().equity, fx("11000"));
     }
 
@@ -1161,8 +1230,12 @@ mod tests {
             ..BacktestConfig::frictionless(fx(capital))
         };
         let data = bars(&["100", "100"]);
-        let one = run_backtest(&data, &mut AlwaysLong, &cfg("10000")).unwrap();
-        let two = run_backtest(&data, &mut Hold(fx("2")), &cfg("10000")).unwrap();
+        let one = run_backtest(&data, &mut AlwaysLong, &cfg("10000"))
+            .unwrap()
+            .curve;
+        let two = run_backtest(&data, &mut Hold(fx("2")), &cfg("10000"))
+            .unwrap()
+            .curve;
         let cost_one = fx("10000").checked_sub(one[1].equity).unwrap();
         let cost_two = fx("10000").checked_sub(two[1].equity).unwrap();
         assert_eq!(cost_one, fx("4.99750125"));
@@ -1176,7 +1249,9 @@ mod tests {
         // 所以要再買到 2 × 12000 ÷ 110 = 218.18181818 顆才回到 2 倍。
         // 零成本時調倉不影響權益，只是把槓桿補回去。
         let data = oc_bars(&[("100", "100"), ("100", "100"), ("110", "110")]);
-        let curve = run_backtest(&data, &mut Hold(fx("2")), &frictionless("10000")).unwrap();
+        let curve = run_backtest(&data, &mut Hold(fx("2")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("10000"), fx("12000")]
@@ -1197,8 +1272,10 @@ mod tests {
             funding_rate: fx("0.0001"),
             ..BacktestConfig::frictionless(fx("10000"))
         };
-        let long = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap();
-        let short = run_backtest(&data, &mut Hold(fx("-1")), &cfg).unwrap();
+        let long = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap().curve;
+        let short = run_backtest(&data, &mut Hold(fx("-1")), &cfg)
+            .unwrap()
+            .curve;
         assert_eq!(equities(&long), vec![fx("10000"), fx("10000"), fx("9999")]);
         assert_eq!(
             equities(&short),
@@ -1219,7 +1296,7 @@ mod tests {
             funding_rate: fx("-0.0001"),
             ..BacktestConfig::frictionless(fx("10000"))
         };
-        let curve = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap();
+        let curve = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap().curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("10000"), fx("10001")]
@@ -1236,7 +1313,7 @@ mod tests {
             funding_rate: fx("0.01"),
             ..BacktestConfig::frictionless(fx("10000"))
         };
-        let curve = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap();
+        let curve = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap().curve;
         let expected: Vec<Fixed> = (0..9)
             .map(|i| if i < 8 { fx("10000") } else { fx("9900") })
             .collect();
@@ -1252,7 +1329,7 @@ mod tests {
             funding_rate: fx("0.0001"),
             ..BacktestConfig::frictionless(fx("10000"))
         };
-        let curve = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap();
+        let curve = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap().curve;
         assert_eq!(equities(&curve), vec![fx("10000"), fx("10000"), fx("9997")]);
     }
 
@@ -1264,7 +1341,7 @@ mod tests {
             funding_rate: fx("0.01"),
             ..BacktestConfig::frictionless(fx("10000"))
         };
-        let curve = run_backtest(&data, &mut AlwaysFlat, &cfg).unwrap();
+        let curve = run_backtest(&data, &mut AlwaysFlat, &cfg).unwrap().curve;
         assert_eq!(equities(&curve), vec![fx("10000"); 3]);
     }
 
@@ -1289,7 +1366,9 @@ mod tests {
     #[test]
     fn a_levered_long_gets_liquidated_and_cannot_recover() {
         let data = oc_bars(&[("100", "100"), ("100", "80.4"), ("100", "100")]);
-        let curve = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000")).unwrap();
+        let curve = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(equities(&curve), vec![fx("10000"), fx("200"), fx("200")]);
         // 沒被平倉的話這裡會是 10000（價格回到原點）
         assert_ne!(curve[2].equity, fx("10000"));
@@ -1301,7 +1380,9 @@ mod tests {
         // 權益 60000 − 59800 = 200 ≤ 59800 × 0.5% = 299 → 買回 500 顆 @119.6，現金 200。
         // 第 2 根價格跌回 100（本來會大賺），但只剩 200 可以再開 5 倍空。
         let data = oc_bars(&[("100", "100"), ("100", "119.6"), ("100", "100")]);
-        let curve = run_backtest(&data, &mut Hold(fx("-5")), &frictionless("10000")).unwrap();
+        let curve = run_backtest(&data, &mut Hold(fx("-5")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(equities(&curve), vec![fx("10000"), fx("200"), fx("200")]);
         assert_ne!(curve[2].equity, fx("10000"));
     }
@@ -1311,11 +1392,15 @@ mod tests {
         // 5 倍做多，價格直接跳空 30%：帳面權益會是 −40000 + 35000 = −5000。
         // 真實世界不會讓你倒欠交易所（保險基金吃掉），所以現金歸零、權益是 0。
         let data = oc_bars(&[("100", "100"), ("100", "100"), ("70", "70")]);
-        let curve = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000")).unwrap();
+        let curve = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(equities(&curve), vec![fx("10000"), fx("10000"), fx("0")]);
         // 爆倉後帳戶剩 0，之後怎麼漲都回不來
         let longer = oc_bars(&[("100", "100"), ("100", "100"), ("70", "70"), ("200", "200")]);
-        let curve = run_backtest(&longer, &mut Hold(fx("5")), &frictionless("10000")).unwrap();
+        let curve = run_backtest(&longer, &mut Hold(fx("5")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert_eq!(curve.last().unwrap().equity, Fixed::ZERO);
     }
 
@@ -1339,8 +1424,10 @@ mod tests {
         // 強制平倉是市價單，一樣要付滑價與吃單費，所以剩下的錢比零成本時少。
         let data = oc_bars(&[("100", "100"), ("100", "80.4"), ("100", "100")]);
         let cfg = futures("10000", "0.0005", "0");
-        let with_cost = run_backtest(&data, &mut Hold(fx("5")), &cfg).unwrap();
-        let free = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000")).unwrap();
+        let with_cost = run_backtest(&data, &mut Hold(fx("5")), &cfg).unwrap().curve;
+        let free = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000"))
+            .unwrap()
+            .curve;
         assert!(
             with_cost[1].equity < free[1].equity,
             "含成本的爆倉殘值 {} 應該比零成本的 {} 少",
@@ -1410,7 +1497,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 1),
             &frictionless("10000"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10000"), fx("20000"), fx("15000")]
@@ -1422,7 +1510,8 @@ mod tests {
             &mut HoldThenFlat::new("1", 1),
             &with_costs("10015.005", "0.0005"),
         )
-        .unwrap();
+        .unwrap()
+        .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10015.005"), fx("10000"), fx("9985.005"), fx("9985.005")]
@@ -1439,10 +1528,76 @@ mod tests {
             slippage: fx("0.0005"),
             ..BacktestConfig::frictionless(fx("10015.005"))
         };
-        let curve = run_backtest(&flat, &mut HoldThenFlat::new("1", 1), &as_futures).unwrap();
+        let curve = run_backtest(&flat, &mut HoldThenFlat::new("1", 1), &as_futures)
+            .unwrap()
+            .curve;
         assert_eq!(
             equities(&curve),
             vec![fx("10015.005"), fx("10000"), fx("9985.005"), fx("9985.005")]
         );
+    }
+
+    // ── 2.6 成交統計 ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_round_trip_counts_two_trades() {
+        // 第 1 根開盤買、第 2 根開盤賣，之後空手不再送單
+        let result = run_backtest(
+            &bars(&["100", "100", "100", "100"]),
+            &mut HoldThenFlat::new("1", 1),
+            &with_costs("10000", "0.0005"),
+        )
+        .unwrap();
+        assert_eq!(result.trades, 2);
+        assert_eq!(result.liquidations, 0);
+    }
+
+    #[test]
+    fn a_flat_strategy_never_sends_an_order() {
+        let result = run_backtest(
+            &bars(&["100", "110", "121"]),
+            &mut AlwaysFlat,
+            &frictionless("10000"),
+        )
+        .unwrap();
+        assert_eq!(result.trades, 0);
+    }
+
+    /// 放棄調倉的那一根不算成交——沒送單就是沒送單。
+    ///
+    /// 和 `a_trade_smaller_than_the_round_trip_cost_is_skipped` 同一組設定：
+    /// 第 1 根建 0.999 倍的倉（一筆），第 2、3 根的調倉都比一趟成本還小而被放棄。
+    #[test]
+    fn a_skipped_rebalance_is_not_counted_as_a_trade() {
+        struct NudgeUp(usize);
+        impl Strategy for NudgeUp {
+            fn on_bar(&mut self, _bar: &Bar) -> TargetPosition {
+                self.0 += 1;
+                TargetPosition::new(if self.0 <= 1 { fx("0.999") } else { fx("1") })
+            }
+        }
+        let result = run_backtest(
+            &bars(&["100", "100", "100", "100"]),
+            &mut NudgeUp(0),
+            &with_costs("10000", "0.0005"),
+        )
+        .unwrap();
+        assert_eq!(result.trades, 1);
+    }
+
+    /// 強制平倉算一筆成交，也單獨記一次爆倉。
+    ///
+    /// 同 `a_levered_long_gets_liquidated_and_cannot_recover` 的三根 K 線：
+    /// 第 1 根開盤建倉（第 1 筆）、第 1 根收盤被平掉（第 2 筆，同時是第 1 次爆倉）、
+    /// 第 2 根開盤拿殘值重開 5 倍（第 3 筆）。
+    ///
+    /// 這就是為什麼 `liquidations` 要單獨記：`trades` 是 3、權益從 10000 掉到 200，
+    /// 但只有 `liquidations == 1` 說得出「其中一筆不是策略決定的」。
+    #[test]
+    fn a_liquidation_is_both_a_trade_and_a_liquidation() {
+        let data = oc_bars(&[("100", "100"), ("100", "80.4"), ("100", "100")]);
+        let result = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000")).unwrap();
+        assert_eq!(result.liquidations, 1);
+        assert_eq!(result.trades, 3);
     }
 }
