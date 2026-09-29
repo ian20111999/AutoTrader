@@ -9,6 +9,7 @@ import { BacktestResult } from "./BacktestResult";
 interface BacktestProps {
   strategyConfig: StrategyConfig | null;
   onGoToStrategies: () => void;
+  onAddToCompare: (summary: BacktestSummary) => void;
 }
 
 function symbolError(raw: string): string | null {
@@ -33,7 +34,7 @@ function strategySummary(strategy: StrategyInfo, values: Record<string, string>)
 
 type Status = "idle" | "loading" | "error" | "success";
 
-export function Backtest({ strategyConfig, onGoToStrategies }: BacktestProps) {
+export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: BacktestProps) {
   const [strategies, setStrategies] = useState<StrategyInfo[] | null>(null);
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setInterval] = useState<string>("1d");
@@ -43,6 +44,7 @@ export function Backtest({ strategyConfig, onGoToStrategies }: BacktestProps) {
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [summary, setSummary] = useState<BacktestSummary | null>(null);
+  const [addedToCompare, setAddedToCompare] = useState(false);
 
   useEffect(() => {
     invoke<StrategyInfo[]>("list_builtin_strategies")
@@ -81,6 +83,7 @@ export function Backtest({ strategyConfig, onGoToStrategies }: BacktestProps) {
     setStatus("loading");
     setErrorMessage(null);
     setSummary(null);
+    setAddedToCompare(false);
     try {
       const result = await invoke<BacktestSummary>("run_backtest_command", { request });
       setSummary(result);
@@ -89,6 +92,12 @@ export function Backtest({ strategyConfig, onGoToStrategies }: BacktestProps) {
       setErrorMessage(String(err));
       setStatus("error");
     }
+  }
+
+  function handleAddToCompare() {
+    if (!summary) return;
+    onAddToCompare(summary);
+    setAddedToCompare(true);
   }
 
   return (
@@ -201,7 +210,21 @@ export function Backtest({ strategyConfig, onGoToStrategies }: BacktestProps) {
             回測失敗：{errorMessage}
           </p>
         )}
-        {status === "success" && summary && <BacktestResult summary={summary} />}
+        {status === "success" && summary && (
+          <>
+            <BacktestResult summary={summary} />
+            <div className="backtest-result-actions">
+              <button
+                type="button"
+                className="backtest-form__submit"
+                onClick={handleAddToCompare}
+                disabled={addedToCompare}
+              >
+                {addedToCompare ? "已加入比較 ✓" : "加入比較"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

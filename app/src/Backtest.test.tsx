@@ -68,7 +68,13 @@ describe("Backtest", () => {
     mockInvoke(() => Promise.resolve(SUMMARY));
     const onGoToStrategies = vi.fn();
 
-    render(<Backtest strategyConfig={null} onGoToStrategies={onGoToStrategies} />);
+    render(
+      <Backtest
+        strategyConfig={null}
+        onGoToStrategies={onGoToStrategies}
+        onAddToCompare={vi.fn()}
+      />,
+    );
 
     expect(
       await screen.findByText("還沒有選擇策略，請先到策略庫選一個策略並調整參數。"),
@@ -81,7 +87,13 @@ describe("Backtest", () => {
   it("有策略設定時顯示策略名稱與參數摘要", async () => {
     mockInvoke(() => Promise.resolve(SUMMARY));
 
-    render(<Backtest strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={vi.fn()}
+      />,
+    );
 
     expect(await screen.findByText("均線交叉：快線週期5、慢線週期20")).toBeInTheDocument();
   });
@@ -89,7 +101,13 @@ describe("Backtest", () => {
   it("起始資金不合法時擋下送出，不呼叫 run_backtest_command", async () => {
     mockInvoke(() => Promise.resolve(SUMMARY));
 
-    render(<Backtest strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={vi.fn()}
+      />,
+    );
     await screen.findByText("均線交叉：快線週期5、慢線週期20");
 
     fireEvent.change(screen.getByLabelText("起始資金"), { target: { value: "0" } });
@@ -102,7 +120,13 @@ describe("Backtest", () => {
   it("送出合法表單時，帶正確的 request 呼叫 run_backtest_command", async () => {
     mockInvoke(() => Promise.resolve(SUMMARY));
 
-    render(<Backtest strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={vi.fn()}
+      />,
+    );
     await screen.findByText("均線交叉：快線週期5、慢線週期20");
 
     fireEvent.change(screen.getByLabelText("交易對"), { target: { value: "ethusdt" } });
@@ -132,7 +156,13 @@ describe("Backtest", () => {
     });
     mockInvoke(() => runPromise);
 
-    render(<Backtest strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={vi.fn()}
+      />,
+    );
     await screen.findByText("均線交叉：快線週期5、慢線週期20");
 
     fireEvent.click(screen.getByRole("button", { name: "執行回測" }));
@@ -145,10 +175,62 @@ describe("Backtest", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("結果出來後點「加入比較」呼叫 onAddToCompare，按鈕變成已加入狀態", async () => {
+    mockInvoke(() => Promise.resolve(SUMMARY));
+    const onAddToCompare = vi.fn();
+
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={onAddToCompare}
+      />,
+    );
+    await screen.findByText("均線交叉：快線週期5、慢線週期20");
+
+    fireEvent.click(screen.getByRole("button", { name: "執行回測" }));
+    await screen.findByRole("region", { name: "回測結果" });
+
+    const addButton = screen.getByRole("button", { name: "加入比較" });
+    fireEvent.click(addButton);
+
+    expect(onAddToCompare).toHaveBeenCalledWith(SUMMARY);
+    expect(screen.getByRole("button", { name: "已加入比較 ✓" })).toBeDisabled();
+  });
+
+  it("重新執行回測時，「加入比較」的已加入狀態會重置", async () => {
+    mockInvoke(() => Promise.resolve(SUMMARY));
+
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={vi.fn()}
+      />,
+    );
+    await screen.findByText("均線交叉：快線週期5、慢線週期20");
+
+    fireEvent.click(screen.getByRole("button", { name: "執行回測" }));
+    await screen.findByRole("region", { name: "回測結果" });
+    fireEvent.click(screen.getByRole("button", { name: "加入比較" }));
+    expect(screen.getByRole("button", { name: "已加入比較 ✓" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "執行回測" }));
+    await screen.findByRole("region", { name: "回測結果" });
+
+    expect(screen.getByRole("button", { name: "加入比較" })).toBeInTheDocument();
+  });
+
   it("run_backtest_command 失敗時顯示錯誤訊息，不會卡在 loading", async () => {
     mockInvoke(() => Promise.reject("找不到這個月的歷史資料"));
 
-    render(<Backtest strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    render(
+      <Backtest
+        strategyConfig={STRATEGY_CONFIG}
+        onGoToStrategies={vi.fn()}
+        onAddToCompare={vi.fn()}
+      />,
+    );
     await screen.findByText("均線交叉：快線週期5、慢線週期20");
 
     fireEvent.click(screen.getByRole("button", { name: "執行回測" }));

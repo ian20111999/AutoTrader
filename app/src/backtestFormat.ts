@@ -35,3 +35,13 @@ export function formatSharpe(raw: string | null, digits = 2): string {
 export function formatPercentMagnitude(raw: string, digits = 2): string {
   return `${Math.abs(toPercent(raw)).toFixed(digits)}%`;
 }
+
+// 依正負值決定要套用哪個顏色 class；BacktestResult 跟 Compare 的指標欄位共用同一套
+// 上色規則，避免同樣的紅綠判斷在兩個地方各寫一份、之後改規則忘了改到另一邊。
+export function signClass(raw: string | null): string {
+  if (raw === null) return "";
+  const value = Number(raw);
+  if (value > 0) return "backtest-metrics__value--positive";
+  if (value < 0) return "backtest-metrics__value--negative";
+  return "";
+}

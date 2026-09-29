@@ -5,18 +5,11 @@ import {
   formatPercentMagnitude,
   formatSharpe,
   formatSignedPercent,
+  signClass,
 } from "./backtestFormat";
 
 interface BacktestResultProps {
   summary: BacktestSummary;
-}
-
-function signClass(raw: string | null): string {
-  if (raw === null) return "";
-  const value = Number(raw);
-  if (value > 0) return "backtest-metrics__value--positive";
-  if (value < 0) return "backtest-metrics__value--negative";
-  return "";
 }
 
 export function BacktestResult({ summary }: BacktestResultProps) {

@@ -4,6 +4,7 @@ import {
   formatPercentMagnitude,
   formatSharpe,
   formatSignedPercent,
+  signClass,
 } from "./backtestFormat";
 
 describe("formatSignedPercent", () => {
@@ -51,5 +52,20 @@ describe("formatSharpe", () => {
 describe("formatPercentMagnitude", () => {
   it("轉成百分比，不帶正負號", () => {
     expect(formatPercentMagnitude("0.0005")).toBe("0.05%");
+  });
+});
+
+describe("signClass", () => {
+  it("正值回傳綠色 class", () => {
+    expect(signClass("0.1")).toBe("backtest-metrics__value--positive");
+  });
+
+  it("負值回傳紅色 class", () => {
+    expect(signClass("-0.1")).toBe("backtest-metrics__value--negative");
+  });
+
+  it("剛好 0 跟 null 都不套用顏色", () => {
+    expect(signClass("0")).toBe("");
+    expect(signClass(null)).toBe("");
   });
 });
