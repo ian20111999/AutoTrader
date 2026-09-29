@@ -5,10 +5,10 @@ import { TopBar } from "./TopBar";
 import { Strategies } from "./Strategies";
 import { Backtest } from "./Backtest";
 import { Compare } from "./Compare";
+import { Settings } from "./Settings";
 import { NAV_ITEMS, type PageId } from "./nav";
 import type { StrategyConfig } from "./strategyTypes";
 import type { BacktestSummary } from "./backtestTypes";
-import packageJson from "../package.json";
 
 const PAGE_TITLES: Record<PageId, string> = Object.fromEntries(
   NAV_ITEMS.map((item) => [item.id, item.label]),
@@ -47,7 +47,7 @@ function App() {
               onGoToBacktest={() => setPage("backtest")}
             />
           )}
-          {page === "settings" && <p>自動交易台 v{packageJson.version}</p>}
+          {page === "settings" && <Settings />}
         </main>
       </div>
     </div>

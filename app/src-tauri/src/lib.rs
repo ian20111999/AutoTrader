@@ -1,7 +1,9 @@
 mod backtest;
+mod settings;
 mod strategies;
 
 use backtest::run_backtest_command;
+use settings::{binance_credentials_status, clear_binance_credentials, save_binance_credentials};
 use strategies::StrategyInfo;
 
 // 證明 Tauri 的 Rust 殼能呼叫 at-core 的型別（3.1 鋪的路，3.2 的
@@ -30,7 +32,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             at_core_version,
             list_builtin_strategies,
-            run_backtest_command
+            run_backtest_command,
+            save_binance_credentials,
+            binance_credentials_status,
+            clear_binance_credentials
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

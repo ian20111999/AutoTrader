@@ -45,6 +45,6 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "設定" }));
     expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();
-    expect(screen.getByText(/^自動交易台 v/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Binance 連線狀態" })).toBeInTheDocument();
   });
 });

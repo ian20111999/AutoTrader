@@ -700,3 +700,153 @@ a:hover {
   border-color: var(--danger);
   color: var(--danger);
 }
+
+/* 連線設定頁面 */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  max-width: 420px;
+}
+
+.settings h2 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.settings-status,
+.settings-form {
+  box-sizing: border-box;
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.settings-status__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.settings-status__list {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-status__item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.settings-status__item dt {
+  color: var(--text-secondary);
+}
+
+.settings-status__item dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-form__field label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-form__field input {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+}
+
+.settings-form__field input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-form__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.settings-form__success {
+  margin: 0;
+  font-size: 12px;
+  color: var(--positive);
+}
+
+.settings-form__save {
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 0 16px;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #1a1405;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.settings-form__save:hover {
+  background: var(--accent-hover);
+}
+
+.settings-form__save:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.settings-clear {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.settings-clear__button {
+  min-height: 36px;
+  padding: 0 16px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--danger);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-clear__button:hover {
+  border-color: var(--danger);
+}
+
+.settings-clear__button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
