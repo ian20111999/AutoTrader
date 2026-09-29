@@ -13,7 +13,7 @@
 //! 這是這個專案自己的格式，不是 Binance 的格式，所以不重用
 //! `kline_csv` 的解析器（欄位數不同：6 欄不是 12 欄）。
 
-use crate::bar::Bar;
+use crate::bar::{Bar, BarError};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -27,6 +27,9 @@ pub enum BarStoreError {
     WrongFieldCount { line: usize, found: usize },
     /// 某一欄不是合法數字。
     BadNumber { line: usize, field: &'static str },
+    /// 數字都解析成功，但湊出來的 K 線不合理（例如最高價低於最低價）。
+    /// 格式合法但數值不合理的檔案可能是手動編輯或程式中途崩潰寫壞的。
+    InvalidBar { line: usize, source: BarError },
     /// 讀寫檔案失敗。
     Io(io::Error),
 }
@@ -39,6 +42,9 @@ impl fmt::Display for BarStoreError {
             }
             BarStoreError::BadNumber { line, field } => {
                 write!(f, "第 {line} 行的 {field} 欄不是合法數字")
+            }
+            BarStoreError::InvalidBar { line, source } => {
+                write!(f, "第 {line} 行解析出的 K 線不合理：{source}")
             }
             BarStoreError::Io(err) => write!(f, "讀寫本機 K 線檔失敗：{err}"),
         }
@@ -67,14 +73,19 @@ fn parse_line(line: &str, line_no: usize) -> Result<Bar, BarStoreError> {
             found: fields.len(),
         });
     }
-    Ok(Bar {
+    let bar = Bar {
         open_time: parse_field(fields[0], line_no, "open_time")?,
         open: parse_field(fields[1], line_no, "open")?,
         high: parse_field(fields[2], line_no, "high")?,
         low: parse_field(fields[3], line_no, "low")?,
         close: parse_field(fields[4], line_no, "close")?,
         volume: parse_field(fields[5], line_no, "volume")?,
-    })
+    };
+    bar.validate().map_err(|source| BarStoreError::InvalidBar {
+        line: line_no,
+        source,
+    })?;
+    Ok(bar)
 }
 
 /// 把儲存格式的文字內容解析成 `Vec<Bar>`。空白行會被跳過；空輸入回傳空陣列。
@@ -225,6 +236,24 @@ mod tests {
                 field: "open"
             }
         ));
+    }
+
+    #[test]
+    fn well_formed_but_unreasonable_bar_is_rejected() {
+        // 欄位格式合法（6 欄、都是合法數字），但 high(90) < low(95)——
+        // 這種檔案可能是手動編輯或程式中途崩潰寫壞的，不能靜默接受。
+        let path = temp_path("invalid_bar.txt");
+        fs::write(&path, "1704067200000,100,90,95,100,12.345\n").unwrap();
+
+        let err = read_bars_file(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            BarStoreError::InvalidBar {
+                line: 1,
+                source: BarError::HighTooLow
+            }
+        ));
+        fs::remove_file(&path).ok();
     }
 
     #[test]
