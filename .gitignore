@@ -1,0 +1,9 @@
+/target/
+/data/
+*.log
+.env
+*.key
+*.pem
+secrets/
+.claude/
+.playwright-mcp/

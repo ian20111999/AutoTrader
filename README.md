@@ -1,0 +1,48 @@
+# 自動交易台（AutoTrader）
+
+自己調參數、回測策略有沒有賺錢，有的話再模擬、再上線交易的桌面工具。
+市場：Binance 現貨與 U 本位永續合約。
+
+- 架構設計、畫面設計：見 Claude 裡的「自動交易系統架構設計」文件與設計稿
+- 開發順序：[docs/ROADMAP.md](docs/ROADMAP.md)
+
+## 目前進度
+
+第 1.6 步：K 線本機儲存（已完成 1.1 定點數、1.2 K 線、1.3 交易規則、1.4 手續費模型、1.5 讀取 Binance 歷史 K 線 CSV）。還沒有連線交易所，不會下任何單。
+每個子步驟的說明在 `docs/steps/`。
+
+## 專案結構
+
+```
+AutoTrader/
+├─ crates/
+│  ├─ core/     共用型別（定點數、K 線、交易規則、手續費、市場、執行模式…），四種模式共用
+│  └─ engine/   交易引擎執行檔
+├─ docs/        開發順序（ROADMAP.md）與每一步的說明（steps/）
+└─ scripts/     輔助腳本（環境檢查）
+```
+
+之後會加上 `app/`（Tauri 桌面程式）與更多引擎模組。
+
+## 第一次使用
+
+1. 在終端機進到這個資料夾，執行環境檢查，缺什麼它會告訴你去哪裡裝：
+
+   - **macOS**：`bash scripts/check-env.sh`
+   - **Windows**（PowerShell）：`powershell -ExecutionPolicy Bypass -File scripts\check-env.ps1`
+
+2. 編譯並執行測試：
+
+   ```
+   cargo build
+   cargo test
+   cargo run -p engine
+   ```
+
+   最後一行會印出引擎狀態與四種執行模式。
+
+## 安全原則
+
+- API 金鑰不寫進程式碼、不放在這個資料夾，之後會存在作業系統的安全儲存區（macOS 鑰匙圈、Windows 認證管理員）。
+- `.gitignore` 已排除 `data/`、`.env`、`*.key` 等檔案。
+- 只有「實盤」模式會動用真實資金；回測與模擬交易永遠不送單。

@@ -1,0 +1,9 @@
+[package]
+name = "at-core"
+description = "共用型別：回測、模擬、測試網、實盤共用"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

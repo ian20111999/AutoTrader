@@ -1,0 +1,283 @@
+//! 策略介面：策略看 K 線，回答「我現在想持有多少部位」。
+//!
+//! 回測（2.2）、成交模擬（2.3）、模擬交易、實盤都透過這一個介面呼叫策略，
+//! 所以同一份策略程式在四種模式下的決策完全一樣。
+//!
+//! 三個刻意的設計：
+//!
+//! 1. **回傳目標部位，不是訂單。** 策略只說「我想要半倉做多」，至於要送幾張單、
+//!    成交價是多少、數量怎麼取整到交易所的級距（`SymbolRules`），是成交模擬的事。
+//!    策略不碰下單，就不會因為換了市場或換了交易所規則而要改。
+//! 2. **歷史由策略自己記。** 均線交叉、布林通道、唐奇安突破、RSI 都要回顧一段歷史，
+//!    但呼叫端不需要知道誰要看幾根：K 線一根一根餵進來，策略在 `on_bar` 裡自己
+//!    維護需要的 rolling window 或累加值。想知道要暖機幾根的人看 `warmup_bars()`。
+//! 3. **部位是有正負的比例，不是開關。** 正數做多、負數做空、`0` 空手。
+//!    現貨目前只會用到 `0` 與正數；合約（2.5）直接用負數做空，用大於 1 的數字
+//!    表示槓桿，介面不用改。
+
+use crate::bar::Bar;
+use crate::fixed::Fixed;
+
+/// 目標部位：策略「想要」的倉位，以策略配置資金的比例計。
+///
+/// - `0` 是空手，正數做多，負數做空。
+/// - `1` 表示資金滿倉做多，`-0.5` 表示用一半資金做空，`2` 表示兩倍槓桿做多。
+///
+/// 用比例而不是數量，是因為策略不該知道帳戶有多少錢、也不該知道交易所的
+/// 數量級距。換算成實際下單數量是成交模擬與 `SymbolRules` 的工作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub struct TargetPosition(Fixed);
+
+impl TargetPosition {
+    /// 空手。
+    pub const FLAT: TargetPosition = TargetPosition(Fixed::ZERO);
+    /// 資金滿倉做多。
+    pub const FULL_LONG: TargetPosition = TargetPosition(Fixed::ONE);
+
+    /// 直接用帶正負號的比例建立。
+    pub const fn new(ratio: Fixed) -> TargetPosition {
+        TargetPosition(ratio)
+    }
+
+    /// 做多，大小取絕對值（傳負數也是做多，避免寫錯符號變成做空）。
+    pub fn long(ratio: Fixed) -> TargetPosition {
+        TargetPosition(ratio.abs())
+    }
+
+    /// 做空，大小取絕對值後轉負。
+    pub fn short(ratio: Fixed) -> TargetPosition {
+        TargetPosition(Fixed::from_raw(-ratio.abs().raw()))
+    }
+
+    /// 帶正負號的比例。
+    pub const fn ratio(self) -> Fixed {
+        self.0
+    }
+
+    pub fn is_flat(self) -> bool {
+        self.0.is_zero()
+    }
+}
+
+/// 一個交易策略。
+///
+/// 實作只要回答「看完這根 K 線，我想持有多少部位」；要怎麼從現在的部位變成
+/// 目標部位，是呼叫端的事。
+pub trait Strategy {
+    /// 這根 K 線收盤了，回傳收盤後想持有的目標部位。
+    ///
+    /// 呼叫端保證：同一個交易對與週期、按開盤時間遞增、每根只餵一次。
+    /// 實作端保證：不 panic；暖機不足或指標算不出來時回傳 [`TargetPosition::FLAT`]，
+    /// 也就是寧可空手也不亂猜。
+    fn on_bar(&mut self, bar: &Bar) -> TargetPosition;
+
+    /// 至少要先餵幾根 K 線，訊號才有意義（例如 20 日均線要 20 根）。
+    ///
+    /// 這只是宣告，不是保護：餵不夠時 `on_bar` 仍然要能安全回傳空手。
+    /// 回測迴圈可以用它把暖機期排除在績效統計外，介面可以用它提醒「資料不夠」。
+    fn warmup_bars(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fx(s: &str) -> Fixed {
+        s.parse().unwrap()
+    }
+
+    /// 2024-01-01 00:00 UTC
+    const T0: i64 = 1_704_067_200_000;
+
+    fn bars(closes: &[&str]) -> Vec<Bar> {
+        closes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let close = fx(c);
+                Bar {
+                    open_time: T0 + i as i64 * 3_600_000,
+                    open: close,
+                    high: close,
+                    low: close,
+                    close,
+                    volume: 1.0,
+                }
+            })
+            .collect()
+    }
+
+    /// 把一串 K 線餵給策略，收集每一根的目標部位。呼叫端只做這件事。
+    fn run(strategy: &mut dyn Strategy, bars: &[Bar]) -> Vec<TargetPosition> {
+        bars.iter().map(|b| strategy.on_bar(b)).collect()
+    }
+
+    /// 永遠滿倉做多。
+    struct AlwaysLong;
+    impl Strategy for AlwaysLong {
+        fn on_bar(&mut self, _bar: &Bar) -> TargetPosition {
+            TargetPosition::FULL_LONG
+        }
+    }
+
+    /// 永遠空手。
+    struct AlwaysFlat;
+    impl Strategy for AlwaysFlat {
+        fn on_bar(&mut self, _bar: &Bar) -> TargetPosition {
+            TargetPosition::FLAT
+        }
+    }
+
+    /// 每 `period` 根切換一次多空，用來驗證策略可以保存自己的狀態。
+    struct Alternating {
+        period: usize,
+        seen: usize,
+    }
+    impl Strategy for Alternating {
+        fn on_bar(&mut self, _bar: &Bar) -> TargetPosition {
+            let phase = self.seen / self.period;
+            self.seen += 1;
+            if phase % 2 == 0 {
+                TargetPosition::FULL_LONG
+            } else {
+                TargetPosition::short(Fixed::ONE)
+            }
+        }
+    }
+
+    /// 需要回顧 `window` 根才會出訊號：收盤價高於視窗內第一根就做多。
+    /// 這是 2.7 那些指標策略的縮小版：歷史自己記，暖機期回傳空手。
+    struct HigherThanWindowStart {
+        window: usize,
+        history: Vec<Fixed>,
+    }
+    impl Strategy for HigherThanWindowStart {
+        fn on_bar(&mut self, bar: &Bar) -> TargetPosition {
+            self.history.push(bar.close);
+            if self.history.len() > self.window {
+                self.history.remove(0);
+            }
+            if self.history.len() < self.window {
+                return TargetPosition::FLAT;
+            }
+            if bar.close > self.history[0] {
+                TargetPosition::FULL_LONG
+            } else {
+                TargetPosition::FLAT
+            }
+        }
+
+        fn warmup_bars(&self) -> usize {
+            self.window
+        }
+    }
+
+    #[test]
+    fn flat_long_short_are_distinguishable() {
+        assert!(TargetPosition::FLAT.is_flat());
+        assert_eq!(TargetPosition::FULL_LONG.ratio(), Fixed::ONE);
+        assert!(!TargetPosition::FULL_LONG.is_flat());
+        assert!(TargetPosition::short(Fixed::ONE).ratio().is_negative());
+        assert!(!TargetPosition::FULL_LONG.ratio().is_negative());
+    }
+
+    #[test]
+    fn position_size_is_not_just_on_off() {
+        // 介面要能表示「半倉」與「兩倍槓桿」，不是只有 0 與 1
+        assert_eq!(TargetPosition::long(fx("0.5")).ratio(), fx("0.5"));
+        assert_eq!(TargetPosition::new(fx("2")).ratio(), fx("2"));
+        assert_eq!(TargetPosition::short(fx("0.25")).ratio(), fx("-0.25"));
+    }
+
+    #[test]
+    fn long_and_short_ignore_the_given_sign() {
+        assert_eq!(
+            TargetPosition::long(fx("-0.5")),
+            TargetPosition::long(fx("0.5"))
+        );
+        assert_eq!(
+            TargetPosition::short(fx("-0.5")),
+            TargetPosition::short(fx("0.5"))
+        );
+        assert_eq!(TargetPosition::short(Fixed::ZERO), TargetPosition::FLAT);
+    }
+
+    #[test]
+    fn default_target_is_flat() {
+        // 忘記設定不會變成不小心開倉
+        assert_eq!(TargetPosition::default(), TargetPosition::FLAT);
+    }
+
+    #[test]
+    fn always_long_returns_long_every_bar() {
+        let bars = bars(&["100", "101", "99"]);
+        assert_eq!(
+            run(&mut AlwaysLong, &bars),
+            vec![TargetPosition::FULL_LONG; 3]
+        );
+        assert_eq!(AlwaysLong.warmup_bars(), 0);
+    }
+
+    #[test]
+    fn always_flat_returns_flat_every_bar() {
+        let bars = bars(&["100", "101", "99"]);
+        assert_eq!(run(&mut AlwaysFlat, &bars), vec![TargetPosition::FLAT; 3]);
+    }
+
+    #[test]
+    fn alternating_strategy_keeps_its_own_state() {
+        let bars = bars(&["100", "101", "102", "103", "104", "105"]);
+        let long = TargetPosition::FULL_LONG;
+        let short = TargetPosition::short(Fixed::ONE);
+        assert_eq!(
+            run(&mut Alternating { period: 2, seen: 0 }, &bars),
+            vec![long, long, short, short, long, long]
+        );
+    }
+
+    #[test]
+    fn strategy_needing_history_stays_flat_until_warmed_up() {
+        let mut s = HigherThanWindowStart {
+            window: 3,
+            history: Vec::new(),
+        };
+        assert_eq!(s.warmup_bars(), 3);
+        // 前兩根資料不足 → 空手；第三根起才有訊號
+        let bars = bars(&["100", "101", "102", "99", "103"]);
+        assert_eq!(
+            run(&mut s, &bars),
+            vec![
+                TargetPosition::FLAT,      // 只有 1 根
+                TargetPosition::FLAT,      // 只有 2 根
+                TargetPosition::FULL_LONG, // 102 > 100
+                TargetPosition::FLAT,      // 99 < 101
+                TargetPosition::FULL_LONG, // 103 > 102
+            ]
+        );
+    }
+
+    #[test]
+    fn strategies_can_be_stored_as_trait_objects() {
+        // 2.2 的回測迴圈與之後的介面會拿一串不同策略跑同一份資料
+        let bars = bars(&["100", "101"]);
+        let mut all: Vec<Box<dyn Strategy>> = vec![
+            Box::new(AlwaysLong),
+            Box::new(AlwaysFlat),
+            Box::new(Alternating { period: 1, seen: 0 }),
+        ];
+        let last: Vec<TargetPosition> = all
+            .iter_mut()
+            .map(|s| *run(s.as_mut(), &bars).last().unwrap())
+            .collect();
+        assert_eq!(
+            last,
+            vec![
+                TargetPosition::FULL_LONG,
+                TargetPosition::FLAT,
+                TargetPosition::short(Fixed::ONE),
+            ]
+        );
+    }
+}

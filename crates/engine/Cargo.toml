@@ -1,0 +1,10 @@
+[package]
+name = "engine"
+description = "交易引擎執行檔"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-core = { path = "../core" }
