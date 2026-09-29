@@ -7,3 +7,5 @@
 secrets/
 .claude/
 .playwright-mcp/
+__pycache__/
+*.pyc
