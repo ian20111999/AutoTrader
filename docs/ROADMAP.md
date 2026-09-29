@@ -46,7 +46,8 @@
 
 ### 4. Binance 唯讀連線
 使用者已提供一組宣稱唯讀的 API 金鑰（存於 macOS Keychain），**使用者確認金鑰權限前不會發出任何真正的網路請求**。詳細計畫見 `docs/plans/2026-09-29-binance-readonly-connection.md`。
-- [ ] 4.1 Keychain 存取模組：Rust 讀寫 OS 安全儲存區，不連網路
+- [x] 4.1 Keychain 存取模組：Rust 讀寫 OS 安全儲存區，不連網路（讀取「既有」憑證在 headless
+      環境會卡在 macOS 的互動授權對話框，要在有畫面的終端機跑過一次才能放行）
 - [ ] 4.2 Binance REST client 骨架＋簽名機制：HMAC-SHA256，打一個唯讀端點驗證
 - [ ] 4.3 帳戶實際費率同步：串接 1.4 `FeeSchedule`，每 24h 更新、失敗沿用舊值
 - [ ] 4.4 下單規則同步：串接 1.3 `SymbolRules`，從 `exchangeInfo` 拿真實規則

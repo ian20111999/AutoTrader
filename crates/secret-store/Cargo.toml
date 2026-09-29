@@ -1,0 +1,10 @@
+[package]
+name = "at-secrets"
+description = "跨平台 OS 安全儲存區（macOS 鑰匙圈、Windows 認證管理員）讀寫"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keyring = "4.2"
