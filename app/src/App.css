@@ -12,6 +12,7 @@
   --accent-hover: #ffd27a;
   --bg-raised: #181d26;
   --danger: #f4555e;
+  --positive: #22c38e;
 
   font-family: "IBM Plex Sans", "Noto Sans TC", sans-serif;
   font-size: 16px;
@@ -298,4 +299,235 @@ a:hover {
 
 .strategy-param-form__apply:hover {
   background: var(--accent-hover);
+}
+
+/* 回測頁面 */
+
+.backtest {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.backtest-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 280px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.backtest-form__fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.backtest-form__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.backtest-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backtest-form__field label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.backtest-form__field input,
+.backtest-form__field select {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 10px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+
+.backtest-form__field input[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.backtest-form__error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger);
+}
+
+.backtest-form__strategy {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.backtest-form__no-strategy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.backtest-form__no-strategy p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.backtest-form__no-strategy button {
+  min-height: 32px;
+  padding: 0 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.backtest-form__submit {
+  min-height: 36px;
+  padding: 0 16px;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  color: #1a1405;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.backtest-form__submit:hover {
+  background: var(--accent-hover);
+}
+
+.backtest-form__fieldset:disabled .backtest-form__submit {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.backtest-main {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.backtest-status {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.backtest-status--error {
+  color: var(--danger);
+}
+
+.backtest-result {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+  padding: 16px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.backtest-metrics {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.backtest-metrics__item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.backtest-metrics__item dt {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.backtest-metrics__item dd {
+  margin: 0;
+  font-family: "JetBrains Mono", monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.backtest-metrics__value--positive {
+  color: var(--positive);
+}
+
+.backtest-metrics__value--negative {
+  color: var(--danger);
+}
+
+.backtest-result__trades {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.backtest-result__cost-disclosure {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* 權益曲線圖 */
+
+.equity-chart {
+  display: block;
+  width: 100%;
+  height: 200px;
+}
+
+.equity-chart__empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.equity-chart__line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.equity-chart__baseline {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.equity-chart__label {
+  fill: var(--text-muted);
+  font-size: 10px;
+  font-family: "JetBrains Mono", monospace;
 }

@@ -3,6 +3,7 @@ import "./App.css";
 import { SideNav } from "./SideNav";
 import { TopBar } from "./TopBar";
 import { Strategies } from "./Strategies";
+import { Backtest } from "./Backtest";
 import { NAV_ITEMS, type PageId } from "./nav";
 import type { StrategyConfig } from "./strategyTypes";
 import packageJson from "../package.json";
@@ -26,7 +27,12 @@ function App() {
           {page === "strategies" && (
             <Strategies strategyConfig={strategyConfig} onApplyConfig={setStrategyConfig} />
           )}
-          {page === "backtest" && <p>回測頁面開發中（ROADMAP 3.6）。</p>}
+          {page === "backtest" && (
+            <Backtest
+              strategyConfig={strategyConfig}
+              onGoToStrategies={() => setPage("strategies")}
+            />
+          )}
           {page === "compare" && <p>回測比較頁面開發中（ROADMAP 3.7）。</p>}
           {page === "settings" && <p>自動交易台 v{packageJson.version}</p>}
         </main>
