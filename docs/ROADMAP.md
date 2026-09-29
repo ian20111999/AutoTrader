@@ -51,7 +51,9 @@
 - [x] 4.2 Binance REST client 骨架＋簽名機制：HMAC-SHA256，打一個唯讀端點驗證（簽名演算法
       已用官方範例離線驗證；真實 API 呼叫已對正式環境的 `/api/v3/account/commission` 打通，
       真的拿到帳戶手續費率資料）
-- [ ] 4.3 帳戶實際費率同步：串接 1.4 `FeeSchedule`，每 24h 更新、失敗沿用舊值
+- [x] 4.3 帳戶實際費率同步：串接 1.4 `FeeSchedule`，每 24h 更新、失敗沿用舊值（新 crate
+      `at-account-sync`；回傳值帶 `Freshness`，過期資料一定標記不會假裝是新的；已用真實帳戶
+      驗證拿到 0.075% 吃單費率 = 標準 0.1% × BNB 折扣 0.75）
 - [ ] 4.4 下單規則同步：串接 1.3 `SymbolRules`，從 `exchangeInfo` 拿真實規則
 - [ ] 4.5 即時行情：WebSocket 連線
 - [x] 4.6 桌面 App「連線設定」畫面：App 內輸入/更新金鑰，顯示連線狀態（提前完成，只依賴

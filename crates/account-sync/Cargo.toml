@@ -1,0 +1,13 @@
+[package]
+name = "at-account-sync"
+description = "把 Binance 帳戶設定（手續費率、下單規則）同步到本機，失敗時沿用上次的值"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-binance = { path = "../binance-client" }
+at-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

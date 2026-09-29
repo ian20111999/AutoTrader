@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/account-sync",
     "crates/binance-client",
     "crates/core",
     "crates/downloader",
