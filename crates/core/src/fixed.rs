@@ -100,6 +100,27 @@ impl Fixed {
         i64::try_from(rounded).ok().map(Fixed)
     }
 
+    /// 相除（例如 金額 ÷ 價格 = 數量）。
+    ///
+    /// 被除數先放大 10^8，商才會是 10^8 倍的定點數。
+    /// 中間用 `i128` 避免溢位；第 9 位小數四捨五入（0.5 遠離零）。
+    /// 除以 0 回傳 `None`，不會 panic。
+    pub fn checked_div(self, rhs: Fixed) -> Option<Fixed> {
+        if rhs.0 == 0 {
+            return None;
+        }
+        let wide = self.0 as i128 * Self::SCALE as i128;
+        let divisor = rhs.0 as i128;
+        let q = wide / divisor;
+        let r = wide % divisor;
+        let rounded = if r.abs() * 2 >= divisor.abs() {
+            q + wide.signum() * divisor.signum()
+        } else {
+            q
+        };
+        i64::try_from(rounded).ok().map(Fixed)
+    }
+
     /// 往下取整到 `step` 的倍數（往負無限大方向）。
     ///
     /// 例：`step = 0.01` 時 `1.239 → 1.23`、`-1.231 → -1.24`。
@@ -298,10 +319,37 @@ mod tests {
     }
 
     #[test]
+    fn divide_amount_by_price_to_get_quantity() {
+        // 1000 USDT ÷ 63880.10 = 0.01565433 BTC（第 9 位進位）
+        assert_eq!(
+            fx("1000").checked_div(fx("63880.10")),
+            Some(fx("0.01565433"))
+        );
+        assert_eq!(fx("10000").checked_div(fx("100")), Some(fx("100")));
+    }
+
+    #[test]
+    fn divide_rounds_ninth_decimal_half_away_from_zero() {
+        // 1÷3 = 0.333…（捨）、2÷3 = 0.666…（進）；負號不影響進位方向
+        assert_eq!(fx("1").checked_div(fx("3")), Some(fx("0.33333333")));
+        assert_eq!(fx("2").checked_div(fx("3")), Some(fx("0.66666667")));
+        assert_eq!(fx("-2").checked_div(fx("3")), Some(fx("-0.66666667")));
+        assert_eq!(fx("2").checked_div(fx("-3")), Some(fx("-0.66666667")));
+    }
+
+    #[test]
+    fn divide_by_zero_returns_none() {
+        assert_eq!(fx("1").checked_div(Fixed::ZERO), None);
+        assert_eq!(Fixed::ZERO.checked_div(Fixed::ZERO), None);
+    }
+
+    #[test]
     fn overflow_returns_none_instead_of_wrong_answer() {
         let big = Fixed::from_raw(i64::MAX);
         assert_eq!(big.checked_add(Fixed::from_raw(1)), None);
         assert_eq!(big.checked_mul(fx("2")), None);
+        // 除以很小的數等於放大，同樣要回 None 而不是溢位
+        assert_eq!(big.checked_div(fx("0.00000001")), None);
     }
 
     #[test]

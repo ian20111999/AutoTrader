@@ -1,0 +1,12 @@
+[package]
+name = "at-downloader"
+description = "從 data.binance.vision 下載歷史 K 線"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-core = { path = "../core" }
+ureq = "3"
+zip = { version = "4", default-features = false, features = ["deflate"] }
