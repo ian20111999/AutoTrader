@@ -2,7 +2,7 @@ import { useState } from "react";
 import "./App.css";
 import { SideNav } from "./SideNav";
 import { TopBar } from "./TopBar";
-import { BuiltinStrategies } from "./BuiltinStrategies";
+import { Strategies } from "./Strategies";
 import { NAV_ITEMS, type PageId } from "./nav";
 import packageJson from "../package.json";
 
@@ -19,7 +19,7 @@ function App() {
       <div className="app-shell__main">
         <TopBar title={PAGE_TITLES[page]} />
         <main className="app-content">
-          {page === "strategies" && <BuiltinStrategies />}
+          {page === "strategies" && <Strategies />}
           {page === "backtest" && <p>回測頁面開發中（ROADMAP 3.6）。</p>}
           {page === "compare" && <p>回測比較頁面開發中（ROADMAP 3.7）。</p>}
           {page === "settings" && <p>自動交易台 v{packageJson.version}</p>}
