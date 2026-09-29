@@ -45,7 +45,7 @@
 明確不做（對應功能還沒做到，先不建空殼 UI）：PaperTrading／LiveTrading／GoLive／Risk／HFTMonitor 畫面，等 ROADMAP 第 5-8 步做到對應功能才回頭做。詳細計畫見 `docs/plans/2026-09-29-tauri-desktop-app.md`。
 
 ### 4. Binance 唯讀連線
-使用者已提供一組宣稱唯讀的 API 金鑰（存於 macOS Keychain），**使用者確認金鑰權限前不會發出任何真正的網路請求**。詳細計畫見 `docs/plans/2026-09-29-binance-readonly-connection.md`。
+使用者已於 2026-09-29 確認：API 金鑰為唯讀（交易/提領權限已關閉），Key/Secret 標籤正確。詳細計畫見 `docs/plans/2026-09-29-binance-readonly-connection.md`。
 - [x] 4.1 Keychain 存取模組：Rust 讀寫 OS 安全儲存區，不連網路（讀取「既有」憑證在 headless
       環境會卡在 macOS 的互動授權對話框，要在有畫面的終端機跑過一次才能放行）
 - [ ] 4.2 Binance REST client 骨架＋簽名機制：HMAC-SHA256，打一個唯讀端點驗證
