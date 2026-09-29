@@ -1,11 +1,23 @@
 :root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  --bg-base: #0b0e13;
+  --bg-sidenav: #0e1218;
+  --bg-panel: #12161d;
+  --nav-active: #1c222b;
+  --border: #242b36;
+  --border-soft: #181d26;
+  --text-primary: #e7eaf0;
+  --text-secondary: #a3acba;
+  --text-muted: #7f8898;
+  --accent: #f2b33d;
+  --accent-hover: #ffd27a;
+
+  font-family: "IBM Plex Sans", "Noto Sans TC", sans-serif;
   font-size: 16px;
   line-height: 24px;
   font-weight: 400;
 
-  color: #0f0f0f;
-  background-color: #f6f6f6;
+  color: var(--text-primary);
+  background-color: var(--bg-base);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -14,22 +26,121 @@
   -webkit-text-size-adjust: 100%;
 }
 
-.container {
+body {
   margin: 0;
-  padding-top: 10vh;
+  background-color: var(--bg-base);
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+.app-shell {
+  display: flex;
+  width: 100%;
+  height: 100vh;
+  background: var(--bg-base);
+  overflow: hidden;
+}
+
+.app-shell__main {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center;
-  text-align: center;
 }
 
-h1 {
-  text-align: center;
+/* SideNav */
+
+.side-nav {
+  flex: 0 0 216px;
+  box-sizing: border-box;
+  height: 100%;
+  background: var(--bg-sidenav);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 18px 12px;
+  gap: 12px;
+  overflow-y: auto;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
+.side-nav__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  height: 32px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.side-nav__items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.side-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  font-family: inherit;
+  background: transparent;
+  color: var(--text-secondary);
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.side-nav__item:hover {
+  background: var(--border-soft);
+}
+
+.side-nav__item--active,
+.side-nav__item--active:hover {
+  background: var(--nav-active);
+  color: var(--accent);
+}
+
+/* TopBar */
+
+.top-bar {
+  flex: 0 0 56px;
+  box-sizing: border-box;
+  height: 56px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  background: var(--bg-base);
+  border-bottom: 1px solid var(--border);
+}
+
+.top-bar h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* 主內容區 */
+
+.app-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 20px;
+  overflow: auto;
+  color: var(--text-primary);
 }
