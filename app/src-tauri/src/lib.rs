@@ -1,5 +1,9 @@
-// 證明 Tauri 的 Rust 殼能呼叫 at-core 的型別（3.2 會加上真正的
-// list_builtin_strategies command，走同一條依賴路徑）。
+mod strategies;
+
+use strategies::StrategyInfo;
+
+// 證明 Tauri 的 Rust 殼能呼叫 at-core 的型別（3.1 鋪的路，3.2 的
+// list_builtin_strategies 走同一條依賴路徑）。
 #[tauri::command]
 fn at_core_version() -> String {
     format!(
@@ -9,11 +13,22 @@ fn at_core_version() -> String {
     )
 }
 
+/// 四個內建策略的名稱與參數 schema，給前端動態產生調參表單用（3.5）。
+/// 這裡不會失敗，但 Tauri command 慣例回傳 `Result`，讓之後其他 command
+/// （例如會讀檔案的）可以照同一個模式處理錯誤。
+#[tauri::command]
+fn list_builtin_strategies() -> Result<Vec<StrategyInfo>, String> {
+    Ok(strategies::builtin_strategies())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![at_core_version])
+        .invoke_handler(tauri::generate_handler![
+            at_core_version,
+            list_builtin_strategies
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

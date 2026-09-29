@@ -35,7 +35,7 @@
 
 ### 3. 桌面 App：Tauri + React
 - [x] 3.1 Tauri 專案骨架：`app/` 目錄、Tauri 2 + React + TS + Vite 初始化，能開一個空白視窗
-- [ ] 3.2 Rust↔前端橋接：第一個 Tauri command（列出內建策略與參數 schema），前端能呼叫並顯示
+- [x] 3.2 Rust↔前端橋接：第一個 Tauri command（列出內建策略與參數 schema），前端能呼叫並顯示
 - [ ] 3.3 版面殼與導覽：TopBar、SideNav、四個分頁路由（策略庫／回測／比較／設定）
 - [ ] 3.4 策略庫頁面：列出四個內建策略卡片，可選擇
 - [ ] 3.5 策略調參頁面：依參數 schema 動態產生表單，可調整並驗證
