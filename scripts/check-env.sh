@@ -18,6 +18,7 @@ v=$(ver rustc --version); show "Rust (rustc)" $([ -n "$v" ] && echo 1 || echo 0)
   "執行：curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh ，裝完重開終端機"
 v=$(ver cargo --version); show "Cargo" $([ -n "$v" ] && echo 1 || echo 0) "$v" "隨 Rust 一起安裝"
 v=$(ver node --version); show "Node.js" $([ -n "$v" ] && echo 1 || echo 0) "$v" "安裝 LTS 版：https://nodejs.org（第 3 步開始需要）"
+v=$(ver npm --version); show "npm" $([ -n "$v" ] && echo 1 || echo 0) "$v" "隨 Node.js 一起安裝（第 3 步桌面 App 開發需要）"
 v=$(ver git --version); show "Git（建議）" $([ -n "$v" ] && echo 1 || echo 0) "$v" "隨 Xcode 命令列工具一起安裝"
 
 echo

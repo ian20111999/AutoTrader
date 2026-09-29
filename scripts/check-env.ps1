@@ -32,9 +32,11 @@ Show "Rust (rustc)" ([bool]$rustc) "$rustc" "從 https://rustup.rs 下載 rustup
 $cargo = Ver "cargo" "--version"
 Show "Cargo" ([bool]$cargo) "$cargo" "隨 Rust 一起安裝"
 
-# 3. Node.js（桌面 App 介面用，第 3 步開始需要）
+# 3. Node.js / npm（桌面 App 介面用，第 3 步開始需要）
 $node = Ver "node" "--version"
 Show "Node.js" ([bool]$node) "$node" "安裝 LTS 版：https://nodejs.org"
+$npm = Ver "npm" "--version"
+Show "npm" ([bool]$npm) "$npm" "隨 Node.js 一起安裝"
 
 # 4. Git（建議，用來保存每一步的版本）
 $git = Ver "git" "--version"
