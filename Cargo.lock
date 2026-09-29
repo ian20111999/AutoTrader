@@ -180,6 +180,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "at-binance"
+version = "0.1.0"
+dependencies = [
+ "at-secrets",
+ "hmac",
+ "sha2",
+ "ureq",
+]
+
+[[package]]
 name = "at-core"
 version = "0.1.0"
 

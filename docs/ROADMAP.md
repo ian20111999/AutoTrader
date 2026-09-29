@@ -48,7 +48,9 @@
 使用者已於 2026-09-29 確認：API 金鑰為唯讀（交易/提領權限已關閉），Key/Secret 標籤正確。詳細計畫見 `docs/plans/2026-09-29-binance-readonly-connection.md`。
 - [x] 4.1 Keychain 存取模組：Rust 讀寫 OS 安全儲存區，不連網路（讀取「既有」憑證在 headless
       環境會卡在 macOS 的互動授權對話框，要在有畫面的終端機跑過一次才能放行）
-- [ ] 4.2 Binance REST client 骨架＋簽名機制：HMAC-SHA256，打一個唯讀端點驗證
+- [x] 4.2 Binance REST client 骨架＋簽名機制：HMAC-SHA256，打一個唯讀端點驗證（簽名演算法
+      已用官方範例離線驗證；真實 API 呼叫已對正式環境的 `/api/v3/account/commission` 打通，
+      真的拿到帳戶手續費率資料）
 - [ ] 4.3 帳戶實際費率同步：串接 1.4 `FeeSchedule`，每 24h 更新、失敗沿用舊值
 - [ ] 4.4 下單規則同步：串接 1.3 `SymbolRules`，從 `exchangeInfo` 拿真實規則
 - [ ] 4.5 即時行情：WebSocket 連線

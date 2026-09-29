@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/downloader", "crates/engine", "crates/secret-store"]
+members = [
+    "crates/binance-client",
+    "crates/core",
+    "crates/downloader",
+    "crates/engine",
+    "crates/secret-store",
+]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,13 @@
+[package]
+name = "at-binance"
+description = "Binance REST API 唯讀 client：HMAC-SHA256 簽名、打已簽名的唯讀端點"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-secrets = { path = "../secret-store" }
+hmac = "0.13"
+sha2 = "0.11"
+ureq = "3"
