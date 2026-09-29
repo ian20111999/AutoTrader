@@ -1,5 +1,7 @@
+mod backtest;
 mod strategies;
 
+use backtest::run_backtest_command;
 use strategies::StrategyInfo;
 
 // 證明 Tauri 的 Rust 殼能呼叫 at-core 的型別（3.1 鋪的路，3.2 的
@@ -27,7 +29,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             at_core_version,
-            list_builtin_strategies
+            list_builtin_strategies,
+            run_backtest_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
