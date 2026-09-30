@@ -12,7 +12,7 @@ ROADMAP 5：「模擬交易：即時行情、模擬成交、按停止才結束�
 
 - [x] 5.1 回測引擎改成「逐根餵」：把 `run_backtest` 內部的逐根迴圈邏輯抽成一個可以維持狀態、一次只吃一根 `Bar` 的介面（例如 `PaperEngine::on_bar(bar) -> Result<EquityPoint, BacktestError>`），`run_backtest` 本身改寫成呼叫這個新介面的薄殼；**既有 195 個測試(尤其 backtest.rs 的)必須逐項對照,結果不能有任何一絲改變**，這是這一步最重要的驗收條件。
 - [x] 5.2 接上 4.5 的即時行情：訂閱 kline stream，只在 `is_closed=true` 時才餵給 5.1 的引擎（未收盤的 K 線只能拿來畫圖，不能觸發策略判斷，這是 4.5 已經查證過的陷阱）。接線放在新 crate `at-paper-trading`，`at-core`（零外部依賴）與 `at-market-stream` 都不依賴對方。
-- [ ] 5.3 執行生命週期管理：開始/停止控制（使用者按停止才結束，不是跑完固定範圍），執行中要能查詢目前狀態（部位、現金、權益、已實現/未實現損益）。
+- [x] 5.3 執行生命週期管理：開始/停止控制（使用者按停止才結束，不是跑完固定範圍），執行中要能查詢目前狀態（部位、現金、權益）。`PaperTradingHandle::stop()` 與 4.5 的 `MarketStreamHandle::stop()` 共用同一個 `Arc<AtomicBool>`，按一次兩層都停；`latest_snapshot()` 回傳最後一根收盤 K 線之後的 `PaperSnapshot`（`point.equity` 就是總權益、`cash`/`position` 就是目前部位，`PaperEngine` 的公開介面沒動）。未實現損益拆分刻意不做——超出這一步範圍，`PaperSnapshot` 已滿足「查詢目前部位與權益」。
 - [ ] 5.4 桌面 App「模擬交易」頁面：對應設計稿 `PaperTrading.dc.html`（之前 3.x 階段刻意跳過，因為底層功能還沒做出來），顯示即時權益曲線、目前部位、開始/停止按鈕。
 
 ## 安全規則（不可違反）

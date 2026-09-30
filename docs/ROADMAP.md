@@ -75,7 +75,13 @@
       `at-paper-trading` 只負責接線，`at-core` 與 `at-market-stream` 都不依賴對方；未收盤 K 線
       與 ticker 一律路過，引擎回錯誤就往外通報一次並停止餵；已對真實 BTCUSDT 1m 串流跑通，
       同一批 K 線走即時管線和走 `run_backtest` 權益曲線逐點相等）
-- [ ] 5.3 執行生命週期管理：開始/停止、查詢目前部位與權益
+- [x] 5.3 執行生命週期管理：`PaperTradingHandle::stop()`／`latest_snapshot()`，以及順手把 4.5
+      留的伏筆補上（`MarketStreamHandle::stop()`）；兩層共用**同一個**停止旗標，按一次停止
+      WebSocket 執行緒也收工、不留孤兒連線。三處阻塞都改成看得到旗標：模擬交易迴圈用
+      `recv_timeout`、WebSocket 讀取設 500ms TCP 讀取逾時（`tungstenite` 明訂 `WouldBlock`
+      不是致命錯誤，半截訊框留在它的緩衝區）、斷線退避等待切成 100ms 一段；新增
+      `PaperUpdate::Stopped`（正常停止，和 `Failed` 的「帳本不可信」語意分開）。實機驗證：
+      真實連線按停止後模擬交易迴圈 207ms 結束、WebSocket 執行緒 502ms 結束
 - [ ] 5.4 桌面 App「模擬交易」頁面：即時權益曲線、目前部位、開始/停止按鈕
 
 ### 之後的大步驟（到時再拆小）

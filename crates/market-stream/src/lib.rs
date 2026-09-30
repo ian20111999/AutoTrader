@@ -25,12 +25,25 @@
 //!
 //! [`Backoff`]：失敗後不會立刻狂重連，等待時間從 1 秒開始每次翻倍、上限 30
 //! 秒；只要成功連上一次就重置回 1 秒。
+//!
+//! # 怎麼停下來（5.3）
+//!
+//! [`MarketStreamHandle::stop`] 設定一個共用的停止旗標，背景執行緒在兩個地方
+//! 看它：讀取迴圈每一圈、退避等待的每一小段。WebSocket 的 `read` 本來會永遠
+//! 阻塞（安靜的串流可能好幾秒沒訊息），所以連上之後會幫底層 TCP socket 設
+//! [`READ_TIMEOUT`] 的讀取逾時——逾時只是「現在還沒有新訊息」（`WouldBlock`），
+//! 不是斷線，迴圈趁這個空檔看一次旗標。tungstenite 明確允許這樣用：
+//! `Error::Io` 除了 `WouldBlock` 之外才算致命，逾時中斷的半截訊框留在它自己的
+//! 緩衝區裡，下一次 `read` 會接著讀完
+//! （<https://docs.rs/tungstenite/0.30.0/tungstenite/protocol/struct.WebSocket.html#method.read>）。
 
 use at_core::{Bar, Fixed, Interval, Symbol};
 use serde::Deserialize;
 use std::fmt;
+use std::io;
 use std::net::TcpStream;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 use tungstenite::stream::MaybeTlsStream;
@@ -39,6 +52,12 @@ use tungstenite::{Message, WebSocket};
 const WS_BASE_URL: &str = "wss://stream.binance.com:9443/ws";
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// 讀取逾時：串流安靜超過這麼久，讀取迴圈就回頭看一次停止旗標。
+/// 這也是 [`MarketStreamHandle::stop`] 生效的上限（正常情況下 kline 串流每秒
+/// 左右就有一則訊息，根本不會等到逾時）。
+const READ_TIMEOUT: Duration = Duration::from_millis(500);
+/// 退避等待時每次回頭看旗標的間隔。
+const STOP_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// 組出即時價格（24hr ticker）串流的名字，給 [`spawn`] 用。
 pub fn ticker_stream(symbol: &str) -> String {
@@ -140,24 +159,43 @@ impl Backoff {
 
 /// 一條已經連上的串流：只管「讀下一則文字訊息」，讓連線邏輯可以在測試裡
 /// 換成假的來源，不需要真的連網路。
+///
+/// 回 `Ok(None)` 代表「現在還沒有新訊息」（讀取逾時），連線還好著——呼叫端
+/// 趁這個空檔看一次停止旗標，然後再讀一次。
 trait MessageSource {
-    fn read_message(&mut self) -> Result<String, StreamError>;
+    fn read_message(&mut self) -> Result<Option<String>, StreamError>;
 }
 
 struct WsSource(WebSocket<MaybeTlsStream<TcpStream>>);
 
 impl MessageSource for WsSource {
-    fn read_message(&mut self) -> Result<String, StreamError> {
+    fn read_message(&mut self) -> Result<Option<String>, StreamError> {
         loop {
             match self.0.read() {
-                Ok(Message::Text(text)) => return Ok(text.as_str().to_string()),
+                Ok(Message::Text(text)) => return Ok(Some(text.as_str().to_string())),
                 Ok(Message::Close(_)) => return Err(StreamError::Closed),
                 // Ping/Pong/Binary/Frame：tungstenite 收到 Ping 會自動排入 Pong
                 // 回覆，在下一次 read/write/flush 時送出，這裡不用手動處理。
                 Ok(_) => continue,
+                Err(e) if is_read_timeout(&e) => return Ok(None),
                 Err(e) => return Err(StreamError::Io(e.to_string())),
             }
         }
+    }
+}
+
+/// 讀取逾時（socket 設了 read timeout、時間到了還沒東西可讀）在 Unix 上是
+/// `WouldBlock`、在 Windows 上是 `TimedOut`。兩者都只代表「還沒有新訊息」，
+/// 不可以當成斷線去重連。
+fn is_read_timeout(error: &tungstenite::Error) -> bool {
+    match error {
+        tungstenite::Error::Io(e) => {
+            matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            )
+        }
+        _ => false,
     }
 }
 
@@ -177,35 +215,82 @@ fn ensure_crypto_provider() {
 fn connect_real(stream_name: &str) -> Result<Box<dyn MessageSource>, StreamError> {
     ensure_crypto_provider();
     let url = format!("{WS_BASE_URL}/{stream_name}");
-    let (socket, _response) =
+    let (mut socket, _response) =
         tungstenite::connect(url).map_err(|e| StreamError::Connect(e.to_string()))?;
+    set_read_timeout(&mut socket, READ_TIMEOUT)?;
     Ok(Box::new(WsSource(socket)))
+}
+
+/// 幫底層的 TCP socket 設讀取逾時，讓讀取迴圈不會卡在 `read` 裡看不到停止旗標。
+///
+/// TLS 連線要穿過 rustls 的 [`rustls::StreamOwned`] 才拿得到真正的 socket；
+/// 逾時設在最底層的 TCP 上，rustls 收到半截 TLS record 會留在自己的緩衝區裡，
+/// 下一次讀取接著讀完。
+fn set_read_timeout(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    timeout: Duration,
+) -> Result<(), StreamError> {
+    let tcp = match socket.get_mut() {
+        MaybeTlsStream::Plain(tcp) => tcp,
+        MaybeTlsStream::Rustls(tls) => &mut tls.sock,
+        // 這個 crate 只開 rustls 一種 TLS 後端，走不到這裡；真的走到了寧可
+        // 當成連線失敗去重連，也不要留一條停不下來的連線。
+        _ => {
+            return Err(StreamError::Connect(
+                "未預期的連線型別，無法設定讀取逾時".to_string(),
+            ))
+        }
+    };
+    tcp.set_read_timeout(Some(timeout))
+        .map_err(|e| StreamError::Connect(format!("設定讀取逾時失敗：{e}")))
+}
+
+/// 退避等待也要能被喊停：切成 [`STOP_CHECK_INTERVAL`] 的小段，每段之間看一次
+/// 旗標。退避最久會到 30 秒，一口氣睡完的話使用者按停止最久要等 30 秒。
+fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) {
+    let mut left = total;
+    while !left.is_zero() && !stop.load(Ordering::Relaxed) {
+        let chunk = left.min(STOP_CHECK_INTERVAL);
+        thread::sleep(chunk);
+        left -= chunk;
+    }
 }
 
 /// 連線 → 讀取 → 解析 → 送進 channel → 失敗就退避重連，這個迴圈本體。
 /// `connect`／`sleep` 都是參數，讓測試可以完全不連真實網路、不真的等待。
 ///
-/// 迴圈只有一個出口：`sender.send` 失敗（呼叫端把 [`MarketStreamHandle`]
-/// 連同 `events` 一起 drop 掉）。
+/// 三個出口：
 ///
-/// ponytail: 這代表呼叫端在連線中斷、目前正在退避等待時把 receiver drop
-/// 掉，背景執行緒不會立刻停止，要等下一次成功連線、送出下一則事件才會發現
-/// receiver 已經沒人收了。這條串流沒有下單、沒有資源競爭風險，多跑幾秒沒有
-/// 實際代價；真的需要「立刻停止」時再加一個 `AtomicBool` 在迴圈開頭檢查。
+/// 1. `stop` 旗標被設定（[`MarketStreamHandle::stop`]）。
+/// 2. `sender.send` 失敗（呼叫端把 [`MarketStreamHandle`] 連同 `events` 一起
+///    drop 掉了）。
+/// 3. `connect` 這個 closure 自己決定不再重試（正式路徑不會，它永遠會重連）。
 fn run_with(
     mut connect: impl FnMut() -> Result<Box<dyn MessageSource>, StreamError>,
     sender: &mpsc::Sender<MarketEvent>,
     backoff: &mut Backoff,
     mut sleep: impl FnMut(Duration),
+    stop: &AtomicBool,
 ) {
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         if let Ok(mut source) = connect() {
             backoff.reset();
-            while let Ok(text) = source.read_message() {
-                if let Some(event) = parse_event(&text) {
-                    if sender.send(event).is_err() {
-                        return;
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                match source.read_message() {
+                    Ok(Some(text)) => {
+                        if let Some(event) = parse_event(&text) {
+                            if sender.send(event).is_err() {
+                                return;
+                            }
+                        }
                     }
+                    // 讀取逾時：連線還好著，只是這半秒沒有新訊息。
+                    Ok(None) => {}
+                    // 斷線：跳出去退避重連。
+                    Err(_) => break,
                 }
             }
         }
@@ -213,11 +298,32 @@ fn run_with(
     }
 }
 
-/// 背景執行緒持有的控制代碼；把它（連同 `events`）drop 掉就會讓背景執行緒
-/// 在下次送出事件時自然結束（見 [`run_with`] 的 ponytail 註解）。
+/// 背景執行緒的控制代碼。停止有兩種方式：呼叫 [`stop`](Self::stop)（立刻生效，
+/// 上限是一次 [`READ_TIMEOUT`]），或是把它連同 `events` 一起 drop 掉（背景執行
+/// 緒要等到下次送出事件、發現沒人收才會結束）。
 pub struct MarketStreamHandle {
     pub events: mpsc::Receiver<MarketEvent>,
+    stop: Arc<AtomicBool>,
     _worker: thread::JoinHandle<()>,
+}
+
+impl MarketStreamHandle {
+    /// 要求背景執行緒收工：關掉連線、結束重連迴圈。
+    ///
+    /// 呼叫後可能還會從 `events` 收到零星幾則已經在 channel 裡排隊的事件。
+    /// 重複呼叫沒有副作用。
+    pub fn stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// 把同一個停止旗標交給上層（5.3 的 `at-paper-trading`）。
+    ///
+    /// 上層拿到的是**同一個**旗標而不是複本，所以上層的「停止」和這裡的
+    /// [`stop`](Self::stop) 是同一個動作——使用者按一次停止，行情連線和上層的
+    /// 模擬交易迴圈都會結束，不會留下還在連著 WebSocket 的孤兒執行緒。
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.stop)
+    }
 }
 
 /// 連上一條 Binance 公開行情串流（名字用 [`ticker_stream`] 或
@@ -225,17 +331,21 @@ pub struct MarketStreamHandle {
 pub fn spawn(stream_name: impl Into<String>) -> MarketStreamHandle {
     let stream_name = stream_name.into();
     let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
     let worker = thread::spawn(move || {
         let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
         run_with(
             || connect_real(&stream_name),
             &tx,
             &mut backoff,
-            thread::sleep,
+            |delay| sleep_unless_stopped(delay, &worker_stop),
+            &worker_stop,
         );
     });
     MarketStreamHandle {
         events: rx,
+        stop,
         _worker: worker,
     }
 }
@@ -480,14 +590,16 @@ mod tests {
     // 收到後就把 receiver drop 掉，這樣下一次 `sender.send` 會失敗、
     // run_with 才會回傳（見 [`run_with`] 文件：這是它唯一的出口）。
 
+    /// 照腳本回答的假串流：從尾巴 pop 一步，`Some(text)` 是收到訊息、
+    /// `None` 是讀取逾時（連線還好著），腳本演完就當成斷線。
     struct FakeSource {
-        remaining: Vec<&'static str>,
+        remaining: Vec<Option<&'static str>>,
     }
 
     impl MessageSource for FakeSource {
-        fn read_message(&mut self) -> Result<String, StreamError> {
+        fn read_message(&mut self) -> Result<Option<String>, StreamError> {
             match self.remaining.pop() {
-                Some(text) => Ok(text.to_string()),
+                Some(step) => Ok(step.map(str::to_string)),
                 None => Err(StreamError::Closed),
             }
         }
@@ -510,7 +622,7 @@ mod tests {
                     Err(StreamError::Connect("測試用的假失敗".to_string()))
                 } else {
                     Ok(Box::new(FakeSource {
-                        remaining: vec![TICKER],
+                        remaining: vec![Some(TICKER)],
                     }) as Box<dyn MessageSource>)
                 }
             },
@@ -527,6 +639,7 @@ mod tests {
                     rx.borrow_mut().take();
                 }
             },
+            &AtomicBool::new(false),
         );
 
         assert_eq!(received.borrow().len(), 1, "應該收到那一則 ticker 事件");
@@ -541,6 +654,108 @@ mod tests {
             "前兩次失敗照 1 秒、2 秒退避；第三次連線成功過，收到訊息後斷線，\
              下一次退避要重新從 1 秒開始，不是接著 2 秒繼續翻倍"
         );
+    }
+
+    // ---- 5.3 停止機制 ----
+
+    #[test]
+    fn a_read_timeout_is_not_treated_as_a_disconnect() {
+        // 來源先回兩次「還沒有新訊息」（讀取逾時），再吐一則 ticker。逾時不可以
+        // 被當成斷線去重連，那則 ticker 必須照樣送出來。
+        let sleeps = RefCell::new(Vec::new());
+        let received = RefCell::new(Vec::new());
+        let (tx, rx) = mpsc::channel();
+        let rx = RefCell::new(Some(rx));
+        let mut backoff = Backoff::new(Duration::from_secs(1), Duration::from_secs(30));
+
+        run_with(
+            || {
+                Ok(Box::new(FakeSource {
+                    // pop 是從尾巴取：逾時、逾時、然後才是那則 ticker。
+                    remaining: vec![Some(TICKER), None, None],
+                }) as Box<dyn MessageSource>)
+            },
+            &tx,
+            &mut backoff,
+            |d| {
+                sleeps.borrow_mut().push(d);
+                if let Some(r) = rx.borrow().as_ref() {
+                    while let Ok(event) = r.try_recv() {
+                        received.borrow_mut().push(event);
+                    }
+                }
+                if !received.borrow().is_empty() {
+                    rx.borrow_mut().take();
+                }
+            },
+            &AtomicBool::new(false),
+        );
+
+        assert_eq!(
+            received.borrow().len(),
+            1,
+            "逾時之後那則 ticker 還是要送出來"
+        );
+        assert_eq!(
+            sleeps.borrow().len(),
+            1,
+            "整段只斷線一次（腳本演完那次），兩次逾時都不可以觸發退避重連"
+        );
+    }
+
+    #[test]
+    fn a_backoff_wait_returns_immediately_once_stopped() {
+        let stop = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        sleep_unless_stopped(Duration::from_secs(30), &stop);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "旗標已經設定時，退避等待不該真的睡滿 30 秒"
+        );
+    }
+
+    #[test]
+    fn stop_ends_the_background_loop_without_waiting_for_a_message() {
+        /// 永遠安靜的串流：每次讀取都逾時，只有停止旗標能讓迴圈結束。
+        struct AlwaysQuiet;
+
+        impl MessageSource for AlwaysQuiet {
+            fn read_message(&mut self) -> Result<Option<String>, StreamError> {
+                // 模擬真實 socket 的讀取逾時：等一下才回「沒有新訊息」。
+                thread::sleep(Duration::from_millis(1));
+                Ok(None)
+            }
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (tx, rx) = mpsc::channel::<MarketEvent>();
+        let worker = thread::spawn(move || {
+            let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
+            run_with(
+                || Ok(Box::new(AlwaysQuiet) as Box<dyn MessageSource>),
+                &tx,
+                &mut backoff,
+                |delay| sleep_unless_stopped(delay, &worker_stop),
+                &worker_stop,
+            );
+            // 迴圈結束時 tx 跟著 drop，主執行緒的 rx 就會收到 Disconnected——
+            // 這是「背景執行緒真的結束了」唯一不需要 join 超時機制的證據。
+        });
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "沒有人喊停、也沒有訊息可讀時，背景迴圈要繼續等下去"
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Err(mpsc::RecvTimeoutError::Disconnected),
+            "喊停之後背景執行緒要在幾個讀取逾時之內結束"
+        );
+        assert!(worker.join().is_ok(), "背景執行緒不該 panic");
     }
 
     // ---- 真實連線（需要網路，預設不跑）----
@@ -562,5 +777,37 @@ mod tests {
         };
         println!("收到即時價格：{} = {}", t.symbol, t.last_price);
         assert!(t.last_price > Fixed::ZERO);
+    }
+
+    /// 真的連上 Binance，收到一則訊息之後呼叫 [`MarketStreamHandle::stop`]，
+    /// 確認背景執行緒真的結束（不是留著一條孤兒 WebSocket 繼續跑）。
+    ///
+    /// 手動驗證：`cargo test -p at-market-stream -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn stop_ends_a_real_binance_connection() {
+        let handle = spawn(ticker_stream("BTCUSDT"));
+        handle
+            .events
+            .recv_timeout(Duration::from_secs(15))
+            .expect("15 秒內應該要收到至少一則真實的 ticker 訊息");
+
+        let started = std::time::Instant::now();
+        handle.stop();
+        // 背景執行緒結束時會 drop 它的 sender，這裡就會收到 Disconnected；
+        // 在那之前可能還會收到停止前就排進 channel 的事件。
+        loop {
+            match handle.events.recv_timeout(Duration::from_secs(5)) {
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("呼叫 stop() 之後 5 秒內背景執行緒還沒結束")
+                }
+            }
+        }
+        println!(
+            "呼叫 stop() 到真實連線的背景執行緒結束：{:?}",
+            started.elapsed()
+        );
     }
 }
