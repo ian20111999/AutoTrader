@@ -9,3 +9,6 @@ secrets/
 .playwright-mcp/
 __pycache__/
 *.pyc
+/.agents/
+/.codex/
+/AGENTS.md
