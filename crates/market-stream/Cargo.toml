@@ -1,0 +1,16 @@
+[package]
+name = "at-market-stream"
+description = "Binance 公開行情 WebSocket 串流：即時價格與 K 線，斷線自動指數退避重連"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-core = { path = "../core" }
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# tungstenite 的 rustls TLS 後端不會自動裝 process 級的 CryptoProvider，直接
+# 依賴 rustls 才能在第一次連線前手動裝一個（見 lib.rs `ensure_crypto_provider`）。
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

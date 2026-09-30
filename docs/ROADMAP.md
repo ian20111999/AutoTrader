@@ -57,7 +57,10 @@
 - [x] 4.4 下單規則同步：串接 1.3 `SymbolRules`，從 `exchangeInfo` 拿真實規則（`at-account-sync`
       新增 `rules` 模組；`exchangeInfo` 是公開端點，`at-binance` 另開不帶金鑰的 `public_get`，
       不讀 Keychain；已對正式環境驗證拿到 BTCUSDT 的 tick 0.01、step 0.00001、最小金額 5 USDT）
-- [ ] 4.5 即時行情：WebSocket 連線
+- [x] 4.5 即時行情：WebSocket 連線（新 crate `at-market-stream`；同步 `tungstenite` + 背景
+      執行緒 + `mpsc` channel，沒有引入 tokio；斷線用指數退避重連 1s→30s；kline 訊息用
+      `k.x` 欄位區分收盤／未收盤，避免把還沒收盤的 K 線誤存成歷史資料；已對
+      `wss://stream.binance.com:9443/ws/btcusdt@ticker` 真實連線收到即時報價）
 - [x] 4.6 桌面 App「連線設定」畫面：App 內輸入/更新金鑰，顯示連線狀態（提前完成，只依賴
       4.1；4.2-4.5 尚未開始，不影響這一步——完全不連 Binance 網路）
 

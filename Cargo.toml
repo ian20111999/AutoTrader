@@ -6,6 +6,7 @@ members = [
     "crates/core",
     "crates/downloader",
     "crates/engine",
+    "crates/market-stream",
     "crates/secret-store",
 ]
 
