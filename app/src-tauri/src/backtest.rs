@@ -22,7 +22,9 @@ use tauri::Manager;
 /// 這一步的預設成本假設：Binance 現貨 VIP0（吃單 0.1%）+ 0.05% 滑價。
 /// 沒有槓桿（strategies 目前全部只做多/空手），所以強制平倉、資金費用不到，
 /// 沿用 [`BacktestConfig::frictionless`] 的維持保證金率、資金費率 0 即可。
-const DEFAULT_SLIPPAGE: Fixed = Fixed::from_raw(50_000); // 0.0005
+///
+/// 5.4 的模擬交易沿用同一組假設（`paper_trading.rs` 也會用到），所以是 `pub(crate)`。
+pub(crate) const DEFAULT_SLIPPAGE: Fixed = Fixed::from_raw(50_000); // 0.0005
 
 /// `run_backtest_command` 的輸入：symbol/interval/區間/策略/參數/起始資金
 /// 一次送進來。跟 `strategyTypes.ts` 的 `StrategyConfig` 對應（`strategyId` + `params`）。
@@ -54,10 +56,15 @@ fn parse_fixed(params: &HashMap<String, String>, key: &str) -> Result<Fixed, Str
 
 /// 依策略 id 與字串參數建立策略物件。只做「字串→型別」的轉換與轉呼叫，
 /// 驗證規則（`StrategyParamError`）完全交給 `at_core::strategies` 既有的建構子。
-fn build_strategy(
+///
+/// 回傳的 trait object 要求 `Send`：四個內建策略都是純值型別（沒有 `Rc`/`RefCell`），
+/// 加這個界限不影響回測（`run_backtest` 只需要 `&mut dyn Strategy`），但讓
+/// `paper_trading.rs` 可以直接重用這個函式建策略丟進背景執行緒
+/// （`at_paper_trading::spawn` 要求 `Box<dyn Strategy + Send>`），不必另外寫一份。
+pub(crate) fn build_strategy(
     strategy_id: &str,
     params: &HashMap<String, String>,
-) -> Result<Box<dyn Strategy>, String> {
+) -> Result<Box<dyn Strategy + Send>, String> {
     match strategy_id {
         "sma_cross" => {
             let fast = parse_usize(params, "fastPeriod")?;

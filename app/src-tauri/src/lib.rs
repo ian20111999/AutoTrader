@@ -1,8 +1,12 @@
 mod backtest;
+mod paper_trading;
 mod settings;
 mod strategies;
 
 use backtest::run_backtest_command;
+use paper_trading::{
+    paper_trading_status, start_paper_trading, stop_paper_trading, PaperTradingState,
+};
 use settings::{binance_credentials_status, clear_binance_credentials, save_binance_credentials};
 use strategies::StrategyInfo;
 
@@ -29,13 +33,17 @@ fn list_builtin_strategies() -> Result<Vec<StrategyInfo>, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(PaperTradingState::default())
         .invoke_handler(tauri::generate_handler![
             at_core_version,
             list_builtin_strategies,
             run_backtest_command,
             save_binance_credentials,
             binance_credentials_status,
-            clear_binance_credentials
+            clear_binance_credentials,
+            start_paper_trading,
+            stop_paper_trading,
+            paper_trading_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

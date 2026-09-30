@@ -850,3 +850,20 @@ a:hover {
   opacity: 0.6;
   cursor: default;
 }
+
+/* 模擬交易頁面：表單/結果版面重用 .backtest-*（同樣是「選資料＋策略→跑→看結果」）。 */
+
+.paper-trading-status--running {
+  color: var(--positive);
+}
+
+.paper-trading-stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+}
+
+.paper-trading-stop {
+  align-self: flex-start;
+}

@@ -82,7 +82,27 @@
       不是致命錯誤，半截訊框留在它的緩衝區）、斷線退避等待切成 100ms 一段；新增
       `PaperUpdate::Stopped`（正常停止，和 `Failed` 的「帳本不可信」語意分開）。實機驗證：
       真實連線按停止後模擬交易迴圈 207ms 結束、WebSocket 執行緒 502ms 結束
-- [ ] 5.4 桌面 App「模擬交易」頁面：即時權益曲線、目前部位、開始/停止按鈕
+- [x] 5.4 桌面 App「模擬交易」頁面：新分頁重用 3.6 回測頁面的表單/結果版面（`.backtest-*`
+      CSS 類別直接沿用）；Rust 端 `start_paper_trading`／`stop_paper_trading`／
+      `paper_trading_status` 三個 command，開始時開一條背景執行緒吃下整個
+      `PaperTradingHandle`、逐則轉成 `app.emit("paper-trading-update", …)` 事件（Tauri
+      command 本身是請求/回應式，沒辦法直接把持續的 channel 回傳給前端）；「停止」不呼叫
+      `PaperTradingHandle::stop`（handle 已經整個搬進背景執行緒），而是在交給
+      `at_paper_trading::spawn` 之前先跟 `MarketStreamHandle::stop_flag()` 要一份共用旗標的
+      複本，跟 5.3 的設計一樣，兩層本來就共用同一個旗標；前端用
+      `@tauri-apps/api/event` 的 `listen` 累積權益曲線、顯示部位/現金/成交/強平統計，
+      頁面掛載時額外查一次 `paper_trading_status` 補上最後已知狀態；收到 `Failed` 顯示
+      紅色警告（帳本不可信），收到 `Stopped` 顯示一般狀態文字。範圍取捨（對照設計稿
+      `PaperTrading.dc.html`）：砍掉多重模擬 session 分頁、模擬 vs 回測疊圖比較、
+      多幣別部位表、逐筆成交紀錄表、資金費/手續費/滑價分項——底層 `PaperTradingHandle`
+      目前只有單一 session、單一交易對、只回累計後的成交筆數，不支援這些。
+      驗證：Rust 端新增 `validate_request`/`apply_update` 純函式單元測試（輸入驗證＋狀態機）
+      ＋ 一個 `#[ignore]` 真實 BTCUSDT 連線測試（已手動跑過，收到真實快照、按停止乾淨收工）；
+      前端用 Vitest + Testing Library，一份手刻 `vi.mock` 的元件測試、
+      另一份改用 Tauri 官方 `@tauri-apps/api/mocks`（`mockIPC` + `shouldMockEvents`）走真正的
+      `invoke`/`listen`/`emit`，驗證開始→即時更新→停止與 Failed 警告兩條路徑；
+      專案沒有 Playwright（3.1-4.6 都只用 Vitest），沿用同一套工具做全流程驗證，不多引入一個
+      新框架
 
 ### 之後的大步驟（到時再拆小）
 - [ ] 6. 測試網下單 + 風控（需要測試網 API 金鑰）

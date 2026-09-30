@@ -7,16 +7,22 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+// 模擬交易頁面會呼叫 listen()；測試環境沒有真的 Tauri IPC，這裡回傳一個不做事的
+// unlisten function，避免未處理的 promise rejection。
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
 describe("App", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockResolvedValue([]);
   });
 
-  it("顯示側邊導覽的四個分頁項目", () => {
+  it("顯示側邊導覽的五個分頁項目", () => {
     render(<App />);
     const nav = screen.getByRole("navigation", { name: "主選單" });
     expect(nav).toBeInTheDocument();
-    for (const label of ["策略庫", "回測", "比較", "設定"]) {
+    for (const label of ["策略庫", "回測", "比較", "模擬交易", "設定"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
   });
@@ -37,11 +43,14 @@ describe("App", () => {
     expect(screen.queryByText(/讀取中|讀取內建策略失敗/)).not.toBeInTheDocument();
   });
 
-  it("點擊「比較」與「設定」都能各自顯示對應內容", () => {
+  it("點擊「比較」「模擬交易」與「設定」都能各自顯示對應內容", () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole("button", { name: "比較" }));
     expect(screen.getByRole("heading", { name: "比較" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "模擬交易" }));
+    expect(screen.getByRole("heading", { name: "模擬交易" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "設定" }));
     expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();

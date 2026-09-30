@@ -5,6 +5,7 @@ import { TopBar } from "./TopBar";
 import { Strategies } from "./Strategies";
 import { Backtest } from "./Backtest";
 import { Compare } from "./Compare";
+import { PaperTrading } from "./PaperTrading";
 import { Settings } from "./Settings";
 import { NAV_ITEMS, type PageId } from "./nav";
 import type { StrategyConfig } from "./strategyTypes";
@@ -45,6 +46,12 @@ function App() {
                 setSavedBacktests((prev) => prev.filter((_, i) => i !== index))
               }
               onGoToBacktest={() => setPage("backtest")}
+            />
+          )}
+          {page === "paperTrading" && (
+            <PaperTrading
+              strategyConfig={strategyConfig}
+              onGoToStrategies={() => setPage("strategies")}
             />
           )}
           {page === "settings" && <Settings />}
