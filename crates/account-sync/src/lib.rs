@@ -1,5 +1,10 @@
 //! 帳戶設定同步：把「跟錢有關的帳戶設定」從 Binance 抓回本機、存起來，
-//! 抓失敗時沿用上次的值。目前只有現貨手續費率（ROADMAP 4.3）。
+//! 抓失敗時沿用上次的值。
+//!
+//! - 這個根模組：現貨手續費率（ROADMAP 4.3）。
+//! - [`rules`]：下單規則（ROADMAP 4.4）。
+//!
+//! 兩邊共用下面這三條規則和 [`Freshness`]：
 //!
 //! 三條規則：
 //!
@@ -11,6 +16,8 @@
 //! 3. **沒有舊值就誠實報錯**：第一次用、又剛好同步失敗時沒有東西可以沿用，
 //!    回傳 [`FeeSyncError::NoCachedFees`]，讓呼叫端自己決定要中止還是先用
 //!    1.4 的 `FeeModel::spot_vip0()` 預設值。
+
+pub mod rules;
 
 use at_binance::{BinanceClient, BinanceError};
 use at_core::{CommissionRates, FeeModel, FeeSchedule, Fixed, SpotFees, Symbol};
@@ -26,7 +33,7 @@ pub const CACHE_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 /// 現貨手續費率端點（唯讀）。
 const COMMISSION_PATH: &str = "/api/v3/account/commission";
 
-/// 這份費率資料有多新。
+/// 這份同步回來的資料有多新（費率與下單規則共用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
     /// 24 小時內同步成功：這次剛打完 API，或用的是還沒過期的本機快取。

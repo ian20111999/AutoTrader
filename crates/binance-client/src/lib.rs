@@ -1,8 +1,12 @@
-//! Binance REST API 唯讀 client：HMAC-SHA256 簽名機制 + 打已簽名的 GET 請求。
+//! Binance REST API 唯讀 client：HMAC-SHA256 簽名機制 + 打 GET 請求。
 //!
-//! 只提供「組簽名、送簽名過的 GET」這個骨架，不解析各端點的回應結構——那是
-//! 後續串接步驟（4.3 帳戶費率、4.4 下單規則）各自的工作，這裡只回傳原始
-//! JSON 字串。
+//! 兩種端點分開兩條路：
+//!
+//! - [`BinanceClient::signed_get`]：需要 API 金鑰與簽名的端點（例如帳戶費率）。
+//! - [`public_get`]：不需要金鑰的公開端點（例如 `/api/v3/exchangeInfo`）。
+//!
+//! 只提供「送出 GET」這個骨架，不解析各端點的回應結構——那是後續串接步驟
+//! （4.3 帳戶費率、4.4 下單規則）各自的工作，這裡只回傳原始 JSON 字串。
 //!
 //! # 安全設計
 //!
@@ -94,22 +98,23 @@ fn timestamp_ms() -> Result<u64, BinanceError> {
         .map_err(|_| BinanceError::SystemClock)
 }
 
-/// 組出「業務參數 + recvWindow + timestamp」的查詢字串、簽名，回傳附上
-/// `signature` 的完整查詢字串。
+/// 把業務參數接成 `a=1&b=2`；沒有參數時回傳空字串。
 ///
 /// ponytail: 參數值假設已經是 URL-safe（Binance 的參數目前都是幣種代碼、
 /// 數字、BUY/SELL 這類英數字），沒有做通用的百分比編碼；真的需要傳非
 /// ASCII 值時再補。
+fn join_params(params: &[(&str, &str)]) -> String {
+    params
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// 組出「業務參數 + recvWindow + timestamp」的查詢字串、簽名，回傳附上
+/// `signature` 的完整查詢字串。
 fn build_signed_query(secret: &str, params: &[(&str, &str)], timestamp_ms: u64) -> String {
-    let mut query = String::new();
-    for (key, value) in params {
-        if !query.is_empty() {
-            query.push('&');
-        }
-        query.push_str(key);
-        query.push('=');
-        query.push_str(value);
-    }
+    let mut query = join_params(params);
     if !query.is_empty() {
         query.push('&');
     }
@@ -119,6 +124,44 @@ fn build_signed_query(secret: &str, params: &[(&str, &str)], timestamp_ms: u64) 
 
     let signature = sign(secret, &query);
     format!("{query}&signature={signature}")
+}
+
+/// 送出 GET 並讀回內文。`api_key` 傳 `None` 代表公開端點：不帶
+/// `X-MBX-APIKEY`，錯誤訊息也不會誤導使用者去檢查根本沒用到的金鑰。
+fn get_text(url: &str, api_key: Option<&str>) -> Result<String, BinanceError> {
+    let mut request = ureq::get(url);
+    if let Some(key) = api_key {
+        request = request.header("X-MBX-APIKEY", key);
+    }
+
+    match request.call() {
+        Ok(mut resp) => resp
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| BinanceError::Response(e.to_string())),
+        Err(ureq::Error::StatusCode(code)) => Err(BinanceError::Http(if api_key.is_some() {
+            format!("HTTP 狀態碼 {code}，請確認金鑰與權限是否正確")
+        } else {
+            format!("HTTP 狀態碼 {code}")
+        })),
+        Err(e) => Err(BinanceError::Http(e.to_string())),
+    }
+}
+
+/// 打一個**公開**端點（Binance 文件標示安全等級 `NONE` 的端點，例如
+/// `/api/v3/exchangeInfo`），回傳原始 JSON 回應字串。
+///
+/// 刻意寫成自由函式而不是 [`BinanceClient`] 的方法：公開端點不需要金鑰，
+/// 那就不該讓它有機會碰到金鑰。呼叫端連 Keychain 都不用讀，也就不會為了查
+/// 一份公開資料而跳出 macOS 的授權對話框。
+pub fn public_get(path: &str, params: &[(&str, &str)]) -> Result<String, BinanceError> {
+    let query = join_params(params);
+    let url = if query.is_empty() {
+        format!("{DEFAULT_BASE_URL}{path}")
+    } else {
+        format!("{DEFAULT_BASE_URL}{path}?{query}")
+    };
+    get_text(&url, None)
 }
 
 /// Binance REST client。只提供打「已簽名 GET」的骨架，不解析特定端點的回應。
@@ -160,20 +203,7 @@ impl BinanceClient {
         let query = build_signed_query(self.api_secret.expose(), params, timestamp);
         let url = format!("{}{}?{}", self.base_url, path, query);
 
-        let response = ureq::get(&url)
-            .header("X-MBX-APIKEY", self.api_key.expose())
-            .call();
-
-        match response {
-            Ok(mut resp) => resp
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| BinanceError::Response(e.to_string())),
-            Err(ureq::Error::StatusCode(code)) => Err(BinanceError::Http(format!(
-                "HTTP 狀態碼 {code}，請確認金鑰與權限是否正確"
-            ))),
-            Err(e) => Err(BinanceError::Http(e.to_string())),
-        }
+        get_text(&url, Some(self.api_key.expose()))
     }
 }
 
@@ -233,6 +263,15 @@ mod tests {
     }
 
     #[test]
+    fn join_params_builds_a_plain_query_string() {
+        assert_eq!(
+            join_params(&[("symbol", "BTCUSDT"), ("limit", "1")]),
+            "symbol=BTCUSDT&limit=1"
+        );
+        assert_eq!(join_params(&[]), "", "沒有參數就不該生出一個空的 `?`");
+    }
+
+    #[test]
     fn build_signed_query_with_no_extra_params_still_has_recv_window_and_timestamp() {
         let query = build_signed_query("secret", &[], 123);
         assert!(query.starts_with("recvWindow=5000&timestamp=123&signature="));
@@ -265,6 +304,22 @@ mod tests {
         assert!(
             body.contains("standardCommission"),
             "回應內容看起來不像手續費資料：{body}"
+        );
+    }
+
+    /// 實際打公開端點 `/api/v3/exchangeInfo`。和上面那個不同：完全不讀
+    /// Keychain、不需要金鑰，所以不會跳出授權對話框。仍然標成 `#[ignore]`，
+    /// 因為需要真實網路連線。
+    ///
+    /// 手動驗證：`cargo test -p at-binance -- --ignored`
+    #[test]
+    #[ignore]
+    fn public_get_exchange_info_against_real_binance() {
+        let body =
+            public_get("/api/v3/exchangeInfo", &[("symbol", "BTCUSDT")]).expect("呼叫公開端點失敗");
+        assert!(
+            body.contains("PRICE_FILTER"),
+            "回應內容看起來不像交易規則：{body}"
         );
     }
 }
