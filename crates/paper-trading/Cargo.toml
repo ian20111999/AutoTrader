@@ -1,0 +1,11 @@
+[package]
+name = "at-paper-trading"
+description = "把 4.5 的即時行情接上 5.1 的逐根餵引擎：只有收盤 K 線才進帳本"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-core = { path = "../core" }
+at-market-stream = { path = "../market-stream" }

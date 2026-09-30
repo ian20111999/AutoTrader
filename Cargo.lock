@@ -224,6 +224,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "at-paper-trading"
+version = "0.1.0"
+dependencies = [
+ "at-core",
+ "at-market-stream",
+]
+
+[[package]]
 name = "at-secrets"
 version = "0.1.0"
 dependencies = [
