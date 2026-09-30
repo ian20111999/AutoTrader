@@ -106,6 +106,16 @@
 //! 變成純記帳模式；這時候權益一旦變負就回 [`BacktestError::NegativeEquity`]，
 //! 絕不會拿一條負權益的曲線繼續往下跑。
 //!
+//! ## 逐根餵：回測與模擬交易共用同一顆引擎（5.1）
+//!
+//! 上面這些邏輯全部住在 [`PaperEngine`] 裡，它一次只吃一根 K 線
+//! （[`PaperEngine::on_bar`]）並自己記住帳本狀態；[`run_backtest`] 只是「把整段
+//! 歷史 K 線逐根餵進去、收集回傳的權益點」的薄殼。
+//!
+//! 這樣寫是因為模擬交易的 K 線是即時一根一根到的，等不到「集滿一整個陣列」。
+//! 兩種模式跑的是同一段程式，所以模擬交易的成交、手續費、滑價、槓桿、強平與
+//! 資金費不可能和回測算出不同的數字——那是這一版最重要的保證。
+//!
 //! ## 想確認記帳沒壞
 //!
 //! 用 [`BacktestConfig::frictionless`] 跑同一份資料：它應該完全複製 2.3 的數字。
@@ -348,118 +358,183 @@ fn funding_periods(prev: i64, now: i64) -> i64 {
     now.div_euclid(FUNDING_INTERVAL_MS) - prev.div_euclid(FUNDING_INTERVAL_MS)
 }
 
-/// 跑一次回測，回傳權益曲線與成交統計。
+/// 逐根餵的引擎：自己維持帳本狀態，一次只吃一根 K 線。
 ///
-/// `bars` 要是同一個交易對與週期、時間遞增的連續 K 線（用 [`crate::find_gaps`] 先檢查）。
-/// 空的 `bars` 不是錯誤，回傳空曲線與 0 筆成交。
-pub fn run_backtest(
-    bars: &[Bar],
-    strategy: &mut dyn Strategy,
-    config: &BacktestConfig,
-) -> Result<BacktestResult, BacktestError> {
-    if config.initial_capital <= Fixed::ZERO {
-        return Err(BacktestError::NonPositiveCapital);
-    }
-    if config.slippage.is_negative() || config.slippage >= Fixed::ONE {
-        return Err(BacktestError::InvalidSlippage);
-    }
-    if config.funding_rate.abs() >= Fixed::ONE {
-        return Err(BacktestError::InvalidFundingRate);
-    }
-    if let Some(rate) = config.maintenance_margin_rate {
-        if rate.is_negative() || rate >= Fixed::ONE {
-            return Err(BacktestError::InvalidMaintenanceMargin);
+/// [`run_backtest`] 只是它的薄殼（對整段 `bars` 逐根呼叫 [`PaperEngine::on_bar`]），
+/// 模擬交易則是每收到一根**已收盤**的即時 K 線就呼叫一次。兩邊跑的是同一段成交、
+/// 手續費、滑價、槓桿、強制平倉與資金費程式，不是兩套各自模擬的邏輯。
+///
+/// 一次吃整個陣列時可以用 `bars[index - 1]` 往前看，逐根餵不行：「上一根的開盤時間」
+/// 和「這是第幾根」都變成引擎自己記的狀態，語意和索引版一樣——`prev_open_time`
+/// 是 `None` 就等於索引版的 `index == 0`（第一根沒有待成交的目標、也不收資金費）。
+///
+/// 沒有 reset：一個引擎只跑一段行情，要重跑就 [`PaperEngine::new`] 一個新的，
+/// 這樣就不會有「重跑第二次忘記清狀態」這種錯。
+pub struct PaperEngine {
+    config: BacktestConfig,
+    costs: Costs,
+    /// 報價幣現金，可以是負的（負現金就是跟交易所借的錢）。
+    cash: Fixed,
+    /// 帶正負號的持倉數量（基礎幣，例如 BTC）：正做多、負做空。
+    qty: Fixed,
+    /// 上一根收盤算出、還沒成交的目標部位。還沒餵過任何一根時是 `None`。
+    pending: Option<TargetPosition>,
+    /// 上一根 K 線的開盤時間；`None` 表示還沒餵過任何一根。
+    prev_open_time: Option<i64>,
+    /// 已經餵完幾根：錯誤裡的 `index` 就是現在這一根的序號，和索引版對得起來。
+    bars_seen: usize,
+    trades: usize,
+    liquidations: usize,
+}
+
+impl PaperEngine {
+    /// 建立引擎：把整場都不會變的設定先驗證、先算好。
+    ///
+    /// 不合理的起始資金、滑價、吃單費率、資金費率與維持保證金率在第一根 K 線
+    /// 進來之前就被擋掉，不會跑到一半才發現參數是錯的。
+    pub fn new(config: &BacktestConfig) -> Result<PaperEngine, BacktestError> {
+        if config.initial_capital <= Fixed::ZERO {
+            return Err(BacktestError::NonPositiveCapital);
         }
+        if config.slippage.is_negative() || config.slippage >= Fixed::ONE {
+            return Err(BacktestError::InvalidSlippage);
+        }
+        if config.funding_rate.abs() >= Fixed::ONE {
+            return Err(BacktestError::InvalidFundingRate);
+        }
+        if let Some(rate) = config.maintenance_margin_rate {
+            if rate.is_negative() || rate >= Fixed::ONE {
+                return Err(BacktestError::InvalidMaintenanceMargin);
+            }
+        }
+        // 成交價的滑價倍數：買貴（>1）、賣賤（<1）。滑價在 [0, 1) 之間，兩個乘數都算得出來。
+        let buy_price = Fixed::ONE
+            .checked_add(config.slippage)
+            .ok_or(BacktestError::InvalidSlippage)?;
+        let sell_price = Fixed::ONE
+            .checked_sub(config.slippage)
+            .ok_or(BacktestError::InvalidSlippage)?;
+
+        // 這一版的成交都是市價單，所以只用 taker 費率；買方、賣方費率可能不同，各取一次。
+        // 費率整場不變，先算出來也順便讓不合理的費率在第一筆成交之前就被擋掉。
+        let (buy_rate, sell_rate) = match &config.fees {
+            Some(model) => (
+                model
+                    .rate(Liquidity::Taker, Side::Buy)
+                    .ok_or(BacktestError::InvalidFeeRate)?,
+                model
+                    .rate(Liquidity::Taker, Side::Sell)
+                    .ok_or(BacktestError::InvalidFeeRate)?,
+            ),
+            None => (Fixed::ZERO, Fixed::ZERO),
+        };
+        if buy_rate.is_negative()
+            || buy_rate >= Fixed::ONE
+            || sell_rate.is_negative()
+            || sell_rate >= Fixed::ONE
+        {
+            return Err(BacktestError::InvalidFeeRate);
+        }
+
+        Ok(PaperEngine {
+            config: *config,
+            costs: Costs {
+                buy_price,
+                sell_price,
+                buy_rate,
+                sell_rate,
+            },
+            cash: config.initial_capital,
+            qty: Fixed::ZERO,
+            pending: None,
+            prev_open_time: None,
+            bars_seen: 0,
+            trades: 0,
+            liquidations: 0,
+        })
     }
-    // 成交價的滑價倍數：買貴（>1）、賣賤（<1）。滑價在 [0, 1) 之間，兩個乘數都算得出來。
-    let buy_price = Fixed::ONE
-        .checked_add(config.slippage)
-        .ok_or(BacktestError::InvalidSlippage)?;
-    let sell_price = Fixed::ONE
-        .checked_sub(config.slippage)
-        .ok_or(BacktestError::InvalidSlippage)?;
 
-    // 這一版的成交都是市價單，所以只用 taker 費率；買方、賣方費率可能不同，各取一次。
-    // 費率整場不變，先算出來也順便讓不合理的費率在第一筆成交之前就被擋掉。
-    let (buy_rate, sell_rate) = match &config.fees {
-        Some(model) => (
-            model
-                .rate(Liquidity::Taker, Side::Buy)
-                .ok_or(BacktestError::InvalidFeeRate)?,
-            model
-                .rate(Liquidity::Taker, Side::Sell)
-                .ok_or(BacktestError::InvalidFeeRate)?,
-        ),
-        None => (Fixed::ZERO, Fixed::ZERO),
-    };
-    if buy_rate.is_negative()
-        || buy_rate >= Fixed::ONE
-        || sell_rate.is_negative()
-        || sell_rate >= Fixed::ONE
-    {
-        return Err(BacktestError::InvalidFeeRate);
+    /// 現金餘額（報價幣）。負數表示跟交易所借的錢，也就是有槓桿。
+    pub fn cash(&self) -> Fixed {
+        self.cash
     }
-    let costs = Costs {
-        buy_price,
-        sell_price,
-        buy_rate,
-        sell_rate,
-    };
 
-    let mut cash = config.initial_capital;
-    // 帶正負號的持倉數量（基礎幣，例如 BTC）：正做多、負做空。
-    let mut qty = Fixed::ZERO;
-    // 上一根收盤算出、還沒成交的目標部位。第一根之前沒有目標，所以是 None。
-    let mut pending: Option<TargetPosition> = None;
-    let mut curve = Vec::with_capacity(bars.len());
-    let mut trades = 0usize;
-    let mut liquidations = 0usize;
+    /// 帶正負號的持倉數量（基礎幣）：正做多、負做空、`0` 空手。
+    pub fn position(&self) -> Fixed {
+        self.qty
+    }
 
-    for (index, bar) in bars.iter().enumerate() {
-        if index > 0 && bar.open_time <= bars[index - 1].open_time {
+    /// 到目前為止送出去的成交筆數，語意同 [`BacktestResult::trades`]。
+    pub fn trades(&self) -> usize {
+        self.trades
+    }
+
+    /// 到目前為止被強制平倉的次數，語意同 [`BacktestResult::liquidations`]。
+    pub fn liquidations(&self) -> usize {
+        self.liquidations
+    }
+
+    /// 餵進一根**已經收盤**的 K 線，回傳這根收盤時的權益點。
+    ///
+    /// 順序和索引版迴圈裡對「這一根」做的事一字不差：① 收付資金費 →
+    /// ② 檢查強制平倉 → ③ 成交上一根留下的目標（用這根開盤價）→
+    /// ④ 用這根收盤價評價、記一點權益 → ⑤ 問策略這根收盤想要什麼部位。
+    ///
+    /// 回錯誤之後帳本已經不完整，不要再繼續餵（[`run_backtest`] 直接放棄整場回測）。
+    pub fn on_bar(
+        &mut self,
+        bar: &Bar,
+        strategy: &mut dyn Strategy,
+    ) -> Result<EquityPoint, BacktestError> {
+        let index = self.bars_seen;
+        if self
+            .prev_open_time
+            .is_some_and(|prev| bar.open_time <= prev)
+        {
             return Err(BacktestError::NonMonotonicTime { index });
         }
         // 開盤價只有在「要成交」或「手上有倉位」時才用得到；第一根永遠不成交，
         // 它的開盤價用不到，所以不檢查也不會拿它算出錯誤的成交。
-        if (pending.is_some() || !qty.is_zero()) && bar.open <= Fixed::ZERO {
+        if (self.pending.is_some() || !self.qty.is_zero()) && bar.open <= Fixed::ZERO {
             return Err(BacktestError::NonPositivePrice { index });
         }
 
         // ① 資金費：上一根開盤到這一根開盤之間跨過幾個結算點就收付幾次。
         //    正費率、做多（數量為正）→ 付出為正 → 現金變少；做空反過來。
-        if !qty.is_zero() && !config.funding_rate.is_zero() && index > 0 {
-            let periods = funding_periods(bars[index - 1].open_time, bar.open_time);
-            if periods > 0 {
-                let times = Fixed::from_int(periods).ok_or(BacktestError::Overflow { index })?;
-                let payment = qty
-                    .checked_mul(bar.open)
-                    .and_then(|notional| notional.checked_mul(config.funding_rate))
-                    .and_then(|per_period| per_period.checked_mul(times))
-                    .ok_or(BacktestError::Overflow { index })?;
-                cash = cash
-                    .checked_sub(payment)
-                    .ok_or(BacktestError::Overflow { index })?;
+        //    第一根沒有「上一根」可以算間隔，所以不收。
+        let periods = match self.prev_open_time {
+            Some(prev) if !self.qty.is_zero() && !self.config.funding_rate.is_zero() => {
+                funding_periods(prev, bar.open_time)
             }
+            _ => 0,
+        };
+        if periods > 0 {
+            let times = Fixed::from_int(periods).ok_or(BacktestError::Overflow { index })?;
+            let payment = self
+                .qty
+                .checked_mul(bar.open)
+                .and_then(|notional| notional.checked_mul(self.config.funding_rate))
+                .and_then(|per_period| per_period.checked_mul(times))
+                .ok_or(BacktestError::Overflow { index })?;
+            self.cash = self
+                .cash
+                .checked_sub(payment)
+                .ok_or(BacktestError::Overflow { index })?;
         }
 
         // ② 強制平倉檢查（開盤價）：先付完資金費才算得準。
-        let hit;
-        (cash, qty, hit) = margin_call(cash, qty, bar.open, config.maintenance_margin_rate, &costs)
-            .ok_or(BacktestError::Overflow { index })?;
-        if hit {
-            liquidations += 1;
-            trades += 1;
-        }
+        self.check_margin(bar.open, index)?;
 
         // ③ 成交上一根留下的目標：用**這根的開盤價**，不是上一根的收盤價。
-        let equity_at_open = qty
+        let equity_at_open = self
+            .qty
             .checked_mul(bar.open)
-            .and_then(|value| cash.checked_add(value))
+            .and_then(|value| self.cash.checked_add(value))
             .ok_or(BacktestError::Overflow { index })?;
         if equity_at_open.is_negative() {
             return Err(BacktestError::NegativeEquity { index });
         }
-        if let Some(target) = pending.take() {
+        if let Some(target) = self.pending.take() {
             // 目標名目金額 = 目標比例 × 成交前權益（帶正負號：正做多、負做空、>1 是槓桿）。
             let budget = target
                 .ratio()
@@ -469,9 +544,10 @@ pub fn run_backtest(
             let provisional = budget
                 .checked_div(bar.open)
                 .ok_or(BacktestError::Overflow { index })?;
-            if provisional != qty {
-                let buying = provisional > qty;
-                let (fill, rate) = costs
+            if provisional != self.qty {
+                let buying = provisional > self.qty;
+                let (fill, rate) = self
+                    .costs
                     .quote(bar.open, buying)
                     .ok_or(BacktestError::Overflow { index })?;
                 if fill <= Fixed::ZERO {
@@ -488,17 +564,17 @@ pub fn run_backtest(
                     .checked_div(unit_cost)
                     .ok_or(BacktestError::Overflow { index })?;
                 let delta = want
-                    .checked_sub(qty)
+                    .checked_sub(self.qty)
                     .ok_or(BacktestError::Overflow { index })?;
                 // 成本讓目標數量比估算的小一點，所以「目標和現況只差一點成本」的時候，
                 // 估出來的方向會和真正要成交的方向相反。這時候這一根完全不動：
                 // 要成交的量比一趟成本還小，硬送一張反方向的單只是白付手續費，
                 // 而且那張單的數量還是用錯邊的費率算出來的。
                 if buying == (delta > Fixed::ZERO) {
-                    cash = settle(cash, delta, bar.open, &costs)
+                    self.cash = settle(self.cash, delta, bar.open, &self.costs)
                         .ok_or(BacktestError::Overflow { index })?;
-                    qty = want;
-                    trades += 1;
+                    self.qty = want;
+                    self.trades += 1;
                 }
             }
         }
@@ -508,34 +584,70 @@ pub fn run_backtest(
         if price <= Fixed::ZERO {
             return Err(BacktestError::NonPositivePrice { index });
         }
-        let hit;
-        (cash, qty, hit) = margin_call(cash, qty, price, config.maintenance_margin_rate, &costs)
-            .ok_or(BacktestError::Overflow { index })?;
-        if hit {
-            liquidations += 1;
-            trades += 1;
-        }
-        let equity = qty
+        self.check_margin(price, index)?;
+        let equity = self
+            .qty
             .checked_mul(price)
-            .and_then(|value| cash.checked_add(value))
+            .and_then(|value| self.cash.checked_add(value))
             .ok_or(BacktestError::Overflow { index })?;
         if equity.is_negative() {
             return Err(BacktestError::NegativeEquity { index });
         }
-        curve.push(EquityPoint {
-            open_time: bar.open_time,
-            equity,
-        });
 
         // ⑤ 這根收盤才問策略，答案留到下一根開盤成交。
-        // 最後一根的目標沒有下一根可以成交，迴圈結束時直接連同 `pending` 作廢。
-        pending = Some(strategy.on_bar(bar));
+        // 沒有下一根就作廢（回測是最後一根，模擬交易是使用者按了停止），
+        // 不影響已經記完的權益曲線。
+        self.pending = Some(strategy.on_bar(bar));
+        self.prev_open_time = Some(bar.open_time);
+        self.bars_seen += 1;
+
+        Ok(EquityPoint {
+            open_time: bar.open_time,
+            equity,
+        })
     }
 
+    /// 維持保證金檢查加計數：開盤與收盤各跑一次，被平掉就同時記一筆成交與一次爆倉。
+    fn check_margin(&mut self, mark: Fixed, index: usize) -> Result<(), BacktestError> {
+        let (cash, qty, hit) = margin_call(
+            self.cash,
+            self.qty,
+            mark,
+            self.config.maintenance_margin_rate,
+            &self.costs,
+        )
+        .ok_or(BacktestError::Overflow { index })?;
+        self.cash = cash;
+        self.qty = qty;
+        if hit {
+            self.liquidations += 1;
+            self.trades += 1;
+        }
+        Ok(())
+    }
+}
+
+/// 跑一次回測，回傳權益曲線與成交統計。
+///
+/// `bars` 要是同一個交易對與週期、時間遞增的連續 K 線（用 [`crate::find_gaps`] 先檢查）。
+/// 空的 `bars` 不是錯誤，回傳空曲線與 0 筆成交（設定本身還是會被檢查）。
+///
+/// 財務邏輯全部在 [`PaperEngine`] 裡，這裡只負責「把整段 K 線逐根餵進去、
+/// 把回傳的權益點收成一條曲線」——所以回測和模擬交易的數字不可能分岔。
+pub fn run_backtest(
+    bars: &[Bar],
+    strategy: &mut dyn Strategy,
+    config: &BacktestConfig,
+) -> Result<BacktestResult, BacktestError> {
+    let mut engine = PaperEngine::new(config)?;
+    let mut curve = Vec::with_capacity(bars.len());
+    for bar in bars {
+        curve.push(engine.on_bar(bar, strategy)?);
+    }
     Ok(BacktestResult {
         curve,
-        trades,
-        liquidations,
+        trades: engine.trades(),
+        liquidations: engine.liquidations(),
     })
 }
 
@@ -1599,5 +1711,189 @@ mod tests {
         let result = run_backtest(&data, &mut Hold(fx("5")), &frictionless("10000")).unwrap();
         assert_eq!(result.liquidations, 1);
         assert_eq!(result.trades, 3);
+    }
+
+    // ── 5.1 逐根餵 ────────────────────────────────────────────────────
+
+    /// 手動迴圈呼叫 [`PaperEngine::on_bar`]，把結果包成和 `run_backtest` 一樣的形狀。
+    ///
+    /// 這就是模擬交易（5.2）要做的事，只差在那邊的 K 線來自 WebSocket 而不是陣列。
+    fn feed_one_by_one(
+        bars: &[Bar],
+        strategy: &mut dyn Strategy,
+        config: &BacktestConfig,
+    ) -> Result<BacktestResult, BacktestError> {
+        let mut engine = PaperEngine::new(config)?;
+        let mut curve = Vec::new();
+        for bar in bars {
+            curve.push(engine.on_bar(bar, strategy)?);
+        }
+        Ok(BacktestResult {
+            curve,
+            trades: engine.trades(),
+            liquidations: engine.liquidations(),
+        })
+    }
+
+    /// 含成本的一趟來回：兩種呼叫方式的曲線、成交筆數、爆倉次數要完全相同。
+    ///
+    /// 數字沿用 `a_round_trip_on_a_flat_market_costs_exactly_the_four_charges`：
+    /// `[10015.005, 10000, 9985.005, 9985.005]`、2 筆成交、0 次爆倉。
+    #[test]
+    fn feeding_bar_by_bar_matches_run_backtest_on_a_costed_round_trip() {
+        let data = bars(&["100", "100", "100", "100"]);
+        let cfg = with_costs("10015.005", "0.0005");
+        let bulk = run_backtest(&data, &mut HoldThenFlat::new("1", 1), &cfg).unwrap();
+        let stepped = feed_one_by_one(&data, &mut HoldThenFlat::new("1", 1), &cfg).unwrap();
+        assert_eq!(bulk, stepped);
+        assert_eq!(
+            equities(&stepped.curve),
+            vec![fx("10015.005"), fx("10000"), fx("9985.005"), fx("9985.005")]
+        );
+        assert_eq!((stepped.trades, stepped.liquidations), (2, 0));
+    }
+
+    /// 槓桿被強制平倉那一段也要對得起來：爆倉計數在逐根餵的世界裡是引擎自己累加的。
+    ///
+    /// 數字沿用 `a_liquidation_is_both_a_trade_and_a_liquidation`：
+    /// `[10000, 200, 200]`、3 筆成交、1 次爆倉。
+    #[test]
+    fn feeding_bar_by_bar_matches_run_backtest_through_a_liquidation() {
+        let data = oc_bars(&[("100", "100"), ("100", "80.4"), ("100", "100")]);
+        let cfg = frictionless("10000");
+        let bulk = run_backtest(&data, &mut Hold(fx("5")), &cfg).unwrap();
+        let stepped = feed_one_by_one(&data, &mut Hold(fx("5")), &cfg).unwrap();
+        assert_eq!(bulk, stepped);
+        assert_eq!(
+            equities(&stepped.curve),
+            vec![fx("10000"), fx("200"), fx("200")]
+        );
+        assert_eq!((stepped.trades, stepped.liquidations), (3, 1));
+    }
+
+    /// 做空 + 資金費：這一組專門盯「上一根的開盤時間」有沒有被引擎記對。
+    ///
+    /// 資金費是用兩根開盤時間的間隔算的：索引版看 `bars[index - 1]`，逐根餵只剩
+    /// `prev_open_time` 可以靠，記錯就會少收或多收（而且曲線看起來還很正常）。
+    /// 數字沿用 `positive_funding_moves_money_from_longs_to_shorts` 的空頭那一半。
+    #[test]
+    fn feeding_bar_by_bar_matches_run_backtest_for_a_short_paying_funding() {
+        let data = bars_every(8 * HOUR, &["100", "100", "100"]);
+        let cfg = BacktestConfig {
+            funding_rate: fx("0.0001"),
+            ..BacktestConfig::frictionless(fx("10000"))
+        };
+        let bulk = run_backtest(&data, &mut Hold(fx("-1")), &cfg).unwrap();
+        let stepped = feed_one_by_one(&data, &mut Hold(fx("-1")), &cfg).unwrap();
+        assert_eq!(bulk, stepped);
+        // 空頭收資金費：10000 → 10000 → 10001
+        assert_eq!(
+            equities(&stepped.curve),
+            vec![fx("10000"), fx("10000"), fx("10001")]
+        );
+        assert_eq!(stepped.liquidations, 0);
+    }
+
+    /// 出錯時兩種呼叫方式要回一樣的錯、一樣的 `index`。
+    ///
+    /// 逐根餵沒有陣列索引可以用，`index` 變成引擎自己數的「這是第幾根」，
+    /// 數錯的話錯誤訊息會指到錯的 K 線。
+    #[test]
+    fn feeding_bar_by_bar_reports_the_same_error_and_index() {
+        let cfg = frictionless("10000");
+
+        // 時間倒退：第 2 根
+        let mut back_in_time = bars(&["100", "100", "100"]);
+        back_in_time[2].open_time = back_in_time[1].open_time;
+        assert_eq!(
+            feed_one_by_one(&back_in_time, &mut AlwaysLong, &cfg),
+            run_backtest(&back_in_time, &mut AlwaysLong, &cfg)
+        );
+        assert_eq!(
+            feed_one_by_one(&back_in_time, &mut AlwaysLong, &cfg),
+            Err(BacktestError::NonMonotonicTime { index: 2 })
+        );
+
+        // 成交用的開盤價是 0：第 1 根
+        let mut bad_open = bars(&["100", "110"]);
+        bad_open[1].open = Fixed::ZERO;
+        assert_eq!(
+            feed_one_by_one(&bad_open, &mut AlwaysLong, &cfg),
+            Err(BacktestError::NonPositivePrice { index: 1 })
+        );
+
+        // 數量爆掉：第 1 根
+        let huge = BacktestConfig::frictionless(Fixed::from_raw(i64::MAX));
+        assert_eq!(
+            feed_one_by_one(&bars(&["0.00000001", "0.00000001"]), &mut AlwaysLong, &huge),
+            Err(BacktestError::Overflow { index: 1 })
+        );
+
+        // 設定本身不合理時，第一根 K 線還沒進來就該被擋掉
+        assert_eq!(
+            PaperEngine::new(&BacktestConfig::frictionless(Fixed::ZERO)).err(),
+            Some(BacktestError::NonPositiveCapital)
+        );
+    }
+
+    /// 逐根餵才有意義的情境：跑到一半停下來問「現在手上有什麼」。
+    ///
+    /// 回測做不到這件事（跑到底才看結果），模擬交易一定要：使用者盯著畫面，
+    /// 每根收盤都要看到現金、部位、權益與成交筆數。
+    #[test]
+    fn engine_state_can_be_read_between_bars() {
+        let data = bars(&["100", "100", "200"]);
+        let mut engine = PaperEngine::new(&frictionless("10000")).unwrap();
+        let mut strategy = AlwaysLong;
+
+        // 還沒餵任何一根：全部是現金、空手、沒送過單
+        assert_eq!(engine.cash(), fx("10000"));
+        assert_eq!(engine.position(), Fixed::ZERO);
+        assert_eq!(engine.trades(), 0);
+
+        // 第 0 根：只記帳，收盤才第一次問策略 → 還沒成交
+        let first = engine.on_bar(&data[0], &mut strategy).unwrap();
+        assert_eq!(first.equity, fx("10000"));
+        assert_eq!(engine.position(), Fixed::ZERO);
+        assert_eq!(engine.trades(), 0);
+
+        // 第 1 根：開盤 100 把 10000 換成 100 顆 → 現金歸零、部位 +100
+        let second = engine.on_bar(&data[1], &mut strategy).unwrap();
+        assert_eq!(second.equity, fx("10000"));
+        assert_eq!(engine.cash(), Fixed::ZERO);
+        assert_eq!(engine.position(), fx("100"));
+        assert_eq!(engine.trades(), 1);
+
+        // 第 2 根：價格翻倍，1 倍滿倉不用調倉 → 部位沒動、權益跟著翻倍
+        let third = engine.on_bar(&data[2], &mut strategy).unwrap();
+        assert_eq!(third.equity, fx("20000"));
+        assert_eq!(engine.position(), fx("100"));
+        assert_eq!(engine.trades(), 1);
+        assert_eq!(engine.liquidations(), 0);
+    }
+
+    /// 每個引擎一份自己的狀態：兩個引擎交錯餵同一段資料互不影響。
+    ///
+    /// 引擎沒有 reset（要重跑就 `new` 一個新的），所以不存在「重跑第二次忘記清狀態」
+    /// 這種錯；這條測試把這個保證固定住。
+    #[test]
+    fn engines_do_not_share_state() {
+        let data = bars(&["100", "100", "110"]);
+        let cfg = frictionless("10000");
+        let expected = run_backtest(&data, &mut AlwaysLong, &cfg).unwrap();
+
+        let mut first = PaperEngine::new(&cfg).unwrap();
+        let mut second = PaperEngine::new(&cfg).unwrap();
+        let (mut first_strategy, mut second_strategy) = (AlwaysLong, AlwaysLong);
+        let mut first_curve = Vec::new();
+        let mut second_curve = Vec::new();
+        for bar in &data {
+            first_curve.push(first.on_bar(bar, &mut first_strategy).unwrap());
+            second_curve.push(second.on_bar(bar, &mut second_strategy).unwrap());
+        }
+        assert_eq!(first_curve, expected.curve);
+        assert_eq!(second_curve, expected.curve);
+        assert_eq!(first.trades(), expected.trades);
+        assert_eq!(second.trades(), expected.trades);
     }
 }
