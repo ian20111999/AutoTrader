@@ -88,7 +88,7 @@ impl std::error::Error for StrategyParamError {}
 /// 所有統計量在**視窗還沒滿**時一律回傳 `None`，策略只要把 `None` 對應到
 /// 「空手」，暖機期就自動安全。
 #[derive(Debug)]
-struct Window {
+pub(crate) struct Window {
     cap: usize,
     values: VecDeque<Fixed>,
     sum_raw: i128,
@@ -97,7 +97,7 @@ struct Window {
 impl Window {
     /// `cap` 是視窗長度。策略的建構子已經擋掉 0，這裡再夾一次下限，
     /// 保證 `mean` 的除法不可能除以 0。
-    fn new(cap: usize) -> Window {
+    pub(crate) fn new(cap: usize) -> Window {
         Window {
             cap: cap.max(1),
             values: VecDeque::new(),
@@ -106,12 +106,12 @@ impl Window {
     }
 
     /// 視窗長度，也就是策略宣告的週期。
-    fn cap(&self) -> usize {
+    pub(crate) fn cap(&self) -> usize {
         self.cap
     }
 
     /// 放進一個新值；超過長度就把最舊的擠掉。
-    fn push(&mut self, value: Fixed) {
+    pub(crate) fn push(&mut self, value: Fixed) {
         if self.values.len() == self.cap {
             if let Some(old) = self.values.pop_front() {
                 self.sum_raw -= old.raw() as i128;
@@ -121,12 +121,12 @@ impl Window {
         self.values.push_back(value);
     }
 
-    fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.values.len() >= self.cap
     }
 
     /// 視窗內數值的總和（內部整數單位）。視窗未滿時回傳 `None`。
-    fn sum(&self) -> Option<i128> {
+    pub(crate) fn sum(&self) -> Option<i128> {
         if !self.is_full() {
             return None;
         }
@@ -134,7 +134,7 @@ impl Window {
     }
 
     /// 簡單移動平均（SMA）。視窗未滿時回傳 `None`。除法往零的方向截尾。
-    fn mean(&self) -> Option<Fixed> {
+    pub(crate) fn mean(&self) -> Option<Fixed> {
         let sum = self.sum()?;
         i64::try_from(sum / self.cap as i128)
             .ok()
@@ -143,7 +143,7 @@ impl Window {
 
     /// 母體標準差（除以 N，不是 N−1）——布林通道用的就是這個定義。
     /// 視窗未滿或平方和溢位時回傳 `None`。
-    fn stddev(&self) -> Option<Fixed> {
+    pub(crate) fn stddev(&self) -> Option<Fixed> {
         let mean = self.mean()?.raw() as i128;
         let mut sum_sq: i128 = 0;
         for value in &self.values {
@@ -158,7 +158,7 @@ impl Window {
     }
 
     /// 視窗內最大值。視窗未滿時回傳 `None`。
-    fn highest(&self) -> Option<Fixed> {
+    pub(crate) fn highest(&self) -> Option<Fixed> {
         if !self.is_full() {
             return None;
         }
@@ -166,7 +166,7 @@ impl Window {
     }
 
     /// 視窗內最小值。視窗未滿時回傳 `None`。
-    fn lowest(&self) -> Option<Fixed> {
+    pub(crate) fn lowest(&self) -> Option<Fixed> {
         if !self.is_full() {
             return None;
         }

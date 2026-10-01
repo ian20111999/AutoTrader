@@ -4,60 +4,7 @@ use super::{non_zero, StrategyParamError};
 use crate::bar::Bar;
 use crate::fixed::Fixed;
 use crate::strategy::{Strategy, TargetPosition};
-
-/// Wilder 平滑平均：RSI 的漲幅／跌幅平均用的就是這個。
-///
-/// 兩個階段：
-///
-/// 1. **種子期**：前 `period` 筆先算一個普通的算術平均。
-/// 2. **之後每筆**：`新平均 = 舊平均 + (這筆 − 舊平均) ÷ period`。
-///
-/// 第 2 式和常見的寫法 `(舊平均 × (period−1) + 這筆) ÷ period` 在數學上相同，
-/// 但這個寫法的中間值一定落在「舊平均」與「這筆」之間，所以**不可能溢位**，
-/// 不必在每根 K 線上處理一個永遠不會發生的錯誤。
-#[derive(Debug)]
-struct WilderAverage {
-    period: usize,
-    seen: usize,
-    seed_sum_raw: i128,
-    average: Option<Fixed>,
-}
-
-impl WilderAverage {
-    fn new(period: usize) -> WilderAverage {
-        WilderAverage {
-            period: period.max(1),
-            seen: 0,
-            seed_sum_raw: 0,
-            average: None,
-        }
-    }
-
-    fn push(&mut self, value: Fixed) {
-        let n = self.period as i128;
-        if let Some(prev) = self.average {
-            let prev_raw = prev.raw() as i128;
-            let next_raw = prev_raw + (value.raw() as i128 - prev_raw) / n;
-            // 結果一定在 prev 與 value 之間，轉回 i64 不可能失敗；
-            // 萬一失敗就維持原值，不讓平均值退回種子模式而重複累加。
-            if let Ok(raw) = i64::try_from(next_raw) {
-                self.average = Some(Fixed::from_raw(raw));
-            }
-            return;
-        }
-        self.seen += 1;
-        self.seed_sum_raw += value.raw() as i128;
-        if self.seen >= self.period {
-            self.average = i64::try_from(self.seed_sum_raw / n)
-                .ok()
-                .map(Fixed::from_raw);
-        }
-    }
-
-    fn value(&self) -> Option<Fixed> {
-        self.average
-    }
-}
+use crate::strategy_dsl::indicators::RsiCore;
 
 /// RSI 策略（均值回歸）。
 ///
@@ -71,8 +18,8 @@ impl WilderAverage {
 ///
 /// ## 用 Wilder 平滑，不是單純的移動平均
 ///
-/// 平均漲跌幅有兩種算法：Wilder 原始定義的平滑平均（見 [`WilderAverage`]），
-/// 和單純取最近 N 根的算術平均（一般叫 Cutler's RSI）。兩者的數值不一樣。
+/// 平均漲跌幅有兩種算法：Wilder 原始定義的平滑平均，和單純取最近 N 根的
+/// 算術平均（一般叫 Cutler's RSI）。兩者的數值不一樣。
 ///
 /// 這裡用 **Wilder**，因為 TradingView、ta-lib、Binance 介面上寫「RSI」指的
 /// 都是它。2.8 要和之前的 Python 回測對照，用同一個定義才對得上。
@@ -83,11 +30,15 @@ impl WilderAverage {
 /// 對照驗證時兩邊要從同一根 K 線開始餵，才不會被這個差異絆倒。
 ///
 /// 完全沒有波動時（平均漲幅與跌幅都是 0）RSI 在數學上無定義，這裡取中性值 50。
+///
+/// ## 計算核心和 DSL 共用
+///
+/// RSI 的數值怎麼算放在 [`RsiCore`]，自訂策略（`strategy_dsl`）的 `rsi` 指標
+/// 節點用的是同一份。**兩邊不可能算出不同的值**——這正是自訂策略那份設計最想
+/// 避免的事（有兩套實作，回測與實盤必然不一致）。
 #[derive(Debug)]
 pub struct Rsi {
-    avg_gain: WilderAverage,
-    avg_loss: WilderAverage,
-    prev_close: Option<Fixed>,
+    core: RsiCore,
     buy_below: Fixed,
     exit_above: Fixed,
     holding: bool,
@@ -101,9 +52,9 @@ impl Rsi {
     /// 預設出場門檻（超買）。
     pub const DEFAULT_EXIT_ABOVE: Fixed = Fixed::from_raw(70 * Fixed::SCALE);
     /// 漲跌幅都是 0 時採用的中性值。
-    pub const NEUTRAL: Fixed = Fixed::from_raw(50 * Fixed::SCALE);
+    pub const NEUTRAL: Fixed = RsiCore::NEUTRAL;
     /// RSI 的上限。
-    const FULL: Fixed = Fixed::from_raw(100 * Fixed::SCALE);
+    const FULL: Fixed = RsiCore::FULL;
 
     /// `period` 是平均漲跌幅的週期，`buy_below` / `exit_above` 是 0～100 的門檻。
     pub fn new(
@@ -121,9 +72,7 @@ impl Rsi {
             return Err(StrategyParamError::ThresholdsOutOfOrder);
         }
         Ok(Rsi {
-            avg_gain: WilderAverage::new(period),
-            avg_loss: WilderAverage::new(period),
-            prev_close: None,
+            core: RsiCore::new(period),
             buy_below,
             exit_above,
             holding: false,
@@ -132,15 +81,7 @@ impl Rsi {
 
     /// 目前的 RSI（0～100）。暖機不足時回傳 `None`。
     pub fn value(&self) -> Option<Fixed> {
-        let gain = self.avg_gain.value()?.raw() as i128;
-        let loss = self.avg_loss.value()?.raw() as i128;
-        let total = gain + loss;
-        if total == 0 {
-            return Some(Rsi::NEUTRAL);
-        }
-        // gain 最多是 i64 的上限（約 9.2×10^18），乘上 10^10 仍遠小於 i128 的上限
-        let raw = 100 * (Fixed::SCALE as i128) * gain / total;
-        i64::try_from(raw).ok().map(Fixed::from_raw)
+        self.core.value()
     }
 }
 
@@ -160,20 +101,9 @@ impl Default for Rsi {
 
 impl Strategy for Rsi {
     fn on_bar(&mut self, bar: &Bar) -> TargetPosition {
-        let Some(prev_close) = self.prev_close.replace(bar.close) else {
-            // 第一根沒有前一根可比，還算不出漲跌幅
+        if !self.core.push_close(bar.close) {
+            // 第一根沒有前一根可比（或相減溢位），還算不出漲跌幅
             return TargetPosition::FLAT;
-        };
-        let Some(change) = bar.close.checked_sub(prev_close) else {
-            // 兩個正數相減不可能溢位；真的發生就空手，不要餵壞平均值
-            return TargetPosition::FLAT;
-        };
-        if change.is_negative() {
-            self.avg_gain.push(Fixed::ZERO);
-            self.avg_loss.push(change.abs());
-        } else {
-            self.avg_gain.push(change);
-            self.avg_loss.push(Fixed::ZERO);
         }
 
         let Some(rsi) = self.value() else {
@@ -195,7 +125,7 @@ impl Strategy for Rsi {
 
     /// 週期 + 1：N 筆漲跌幅需要 N+1 根 K 線。
     fn warmup_bars(&self) -> usize {
-        self.avg_gain.period + 1
+        self.core.period() + 1
     }
 }
 
