@@ -7,3 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# 只用 derive：自訂策略（strategy_dsl）的 AST 必須能從 JSON 來回，
+# 而手寫兩套平行 DTO + 轉換函式一定會慢慢不同步。
+# serde 已經在 Cargo.lock 裡（binance-client、market-stream、account-sync、
+# src-tauri 都在用），所以沒有新的下載或編譯成本。
+# serde_json **不加進 at-core**：反序列化在 Tauri command 邊界做。
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# 只有測試需要把 DSL 的 JSON 字串解析出來。
+serde_json = "1"

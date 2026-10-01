@@ -13,6 +13,7 @@ pub mod metrics;
 pub mod rules;
 pub mod strategies;
 pub mod strategy;
+pub mod strategy_dsl;
 pub mod types;
 pub mod warmup;
 
@@ -29,6 +30,7 @@ pub use metrics::{Metrics, MS_PER_YEAR};
 pub use rules::{RuleViolation, RulesError, SymbolRules};
 pub use strategies::{Bollinger, Donchian, Rsi, SmaCross, StrategyParamError};
 pub use strategy::{DirectionMode, LeveragedStrategy, Strategy, TargetPosition};
+pub use strategy_dsl::{Cond, CustomStrategy, DslError, Expr, StrategyAst};
 pub use types::{Liquidity, Market, RunMode, Side, Symbol, SymbolError};
 pub use warmup::{warmup_fetch_count, WarmupBars, WARMUP_SAFETY_FACTOR};
 
