@@ -1,48 +1,43 @@
 //! 6.5 測試網交易頁面的 Tauri command 橋接：開始/停止/一鍵停止/查詢狀態 +
 //! 事件轉發。架構抄 `paper_trading.rs`（背景執行緒把 `updates` channel 轉成
-//! Tauri 事件），這裡是整個專案第一次會在 UI 上真的送出訂單（僅限
-//! 測試網 Demo Trading），所以每個 command 的輸入都要先過
-//! [`validate_request`] 這一關，不連網路也不開執行緒。
+//! Tauri 事件）。Phase B（session registry，ADR-001）之後改成多場並行：
+//! 每個 command 都要帶 `sessionId`，`start_testnet_trading` 回傳新開的那場的
+//! id，這裡是整個專案第一次會在 UI 上真的送出訂單（僅限測試網 Demo
+//! Trading），所以每個 command 的輸入都要先過 [`validate_request`] 這一關，
+//! 不連網路也不開執行緒。
 //!
-//! # 跟 `paper_trading.rs` 不一樣的地方：怎麼做「一鍵停止」
+//! # handle 留在 registry（跟 paper_trading.rs 統一，ADR §4.4）
 //!
-//! `paper_trading.rs` 的「停止」沒辦法呼叫 `PaperTradingHandle::stop()`，
-//! 因為整個 handle（含 `updates`）被搬進了背景執行緒之後，別的 command
-//! 就再也拿不到它，只好另外在 spawn 之前跟行情連線要一份停止旗標的複本。
-//!
-//! 這裡的 [`TestnetTradingHandle`] 整個（含 `updates`）留在
-//! [`TestnetTradingState`] 共用狀態裡，**不**搬進背景執行緒——
+//! [`TestnetTradingHandle`] 整個（含 `updates`）留在
+//! `SessionEntry::control` 裡，**不**搬進背景執行緒——
 //! `stop`/`set_kill_switch`/`kill_switch`/`latest_snapshot` 都只要
-//! `&self`，其他 command 隨時可以鎖一下共用狀態就呼叫到，不必像 5.4
-//! 那樣另外要一份旗標複本，也不需要去動 `at_testnet_trading` 裡本來是
-//! 私有欄位的 `kill_switch: Arc<AtomicBool>`（那個 crate 已經審查過，
-//! 不多開一個 public getter）。
+//! `&self`，其他 command 鎖一下 `SessionEntry::control` 就呼叫到，不需要去
+//! 動 `at_testnet_trading` 裡本來是私有欄位的 `kill_switch: Arc<AtomicBool>`
+//! （那個 crate 已經審查過，不多開一個 public getter）。
 //!
 //! 代價是背景執行緒不能直接 `for update in handle.updates.iter()`
-//! 整段佔住共用鎖（`updates: mpsc::Receiver<TestnetUpdate>` 不是
-//! `Sync`，`Mutex<Inner>` 需要 `Inner: Send` 才能一起放進 Tauri app
-//! state，而 `Send` 沒問題——只有「同時」才不安全）：改成每次只鎖一下、
-//! `recv_timeout` 200 毫秒（跟 `at_testnet_trading`/`at_market_stream`
-//! 自己的 `STOP_CHECK_INTERVAL` 同一個數字），逾時就放手鎖、讓其他
-//! command 有機會插進來，再重新鎖一次繼續等。停止/一鍵停止command
-//! 因此最多等 200 毫秒就能拿到鎖，不會被「等下一根 K 線」卡住。
-//!
-//! 「目前狀態」一樣不呼叫 `latest_snapshot()`：背景執行緒每收到一則
-//! [`TestnetUpdate::Bar`] 就順手把它寫進 [`TestnetTradingState`]，
-//! `testnet_trading_status` 直接讀這份存檔。
+//! 整段佔住鎖（`updates: mpsc::Receiver<TestnetUpdate>` 不是 `Sync`）：
+//! 改成每次只鎖一下、`recv_timeout` 200 毫秒，逾時就放手鎖、讓其他
+//! command 有機會插進來，再重新鎖一次繼續等。停止/一鍵停止 command
+//! 因此最多等 200 毫秒就能拿到鎖，不會被「等下一根 K 線」卡住。多 session
+//! 之後每場各自一把鎖，不會互相排隊（ADR §4.4：testnet 文件原本擔心的
+//! 全域鎖競爭在這個設計下不存在）。
 
+use crate::session_registry::{
+    new_running_record, now_ms, LiveStatus, SessionControl, SessionEntry, SessionId, SessionMeta,
+    SessionRegistry, SessionRegistryChangedEvent, SESSION_REGISTRY_CHANGED_EVENT,
+};
 use at_binance::testnet::BinanceTestnetClient;
 use at_core::{Fixed, Interval, Strategy, Symbol};
 use at_market_stream::{kline_stream, spawn as spawn_stream};
 use at_risk_control::RiskLimits;
 use at_testnet_trading::{
-    spawn as spawn_testnet, FillReport, OrderOutcome, TestnetConfig, TestnetSnapshot,
-    TestnetTradingHandle, TestnetUpdate,
+    spawn as spawn_testnet, FillReport, OrderOutcome, TestnetConfig, TestnetSnapshot, TestnetUpdate,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::mpsc::RecvTimeoutError;
-use std::sync::Mutex;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -69,7 +64,7 @@ pub struct StartTestnetTradingRequest {
 }
 
 /// 一根收盤 K 線處理完之後的帳本狀態，數字用字串保留 `Fixed` 的精確表示。
-#[derive(Serialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TestnetSnapshotDto {
     pub open_time: i64,
@@ -162,11 +157,21 @@ pub enum TestnetUpdateEvent {
     Failed { message: String },
 }
 
+/// 事件 payload 外層多包一個 `sessionId`，前端依它過濾（ADR §7.3）。
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+struct TestnetUpdateEnvelope<'a> {
+    session_id: &'a str,
+    #[serde(flatten)]
+    event: TestnetUpdateEvent,
+}
+
 /// `testnet_trading_status` 查詢命令的回傳：畫面重新掛載/切回來時，補上
 /// 最後已知狀態，不用等下一個事件才有東西可看。
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum TestnetTradingStatusDto {
+    /// 從來沒開始過，或這場 session 已經停止並離開了 registry。
     Idle,
     Running {
         snapshot: Option<TestnetSnapshotDto>,
@@ -182,65 +187,20 @@ pub enum TestnetTradingStatusDto {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
-enum RunState {
-    #[default]
-    Idle,
-    Running,
-    Stopped,
-    Failed(String),
-}
-
-#[derive(Default)]
-struct Inner {
-    state: RunState,
-    /// 整個 handle 留在這裡（見模組文件），`stop_testnet_trading` 與
-    /// `set_testnet_kill_switch` 都靠它呼叫對應的 `&self` 方法。
-    handle: Option<TestnetTradingHandle>,
-    latest: Option<TestnetSnapshotDto>,
-}
-
-/// Tauri app state：全域只允許同時跑一場測試網交易。
-#[derive(Default)]
-pub struct TestnetTradingState(Mutex<Inner>);
-
-fn status_dto(inner: &Inner) -> TestnetTradingStatusDto {
-    match &inner.state {
-        RunState::Idle => TestnetTradingStatusDto::Idle,
-        RunState::Running => TestnetTradingStatusDto::Running {
-            snapshot: inner.latest.clone(),
-        },
-        RunState::Stopped => TestnetTradingStatusDto::Stopped {
-            snapshot: inner.latest.clone(),
-        },
-        RunState::Failed(message) => TestnetTradingStatusDto::Failed {
-            snapshot: inner.latest.clone(),
-            message: message.clone(),
-        },
-    }
-}
-
-/// 套用一則測試網交易更新到共用狀態，回傳要往前端送的事件。刻意拆成純函式
-/// （不碰 Tauri/背景執行緒/網路），方便直接測試狀態機對不對。
-fn apply_update(inner: &mut Inner, update: TestnetUpdate) -> TestnetUpdateEvent {
+/// 把一則 [`TestnetUpdate`] 轉成要往前端送的事件。純函式（不碰 Tauri/背景
+/// 執行緒/網路），方便直接測試轉換對不對。
+fn to_event(update: &TestnetUpdate) -> TestnetUpdateEvent {
     match update {
         TestnetUpdate::Order(outcome) => TestnetUpdateEvent::Order {
-            outcome: outcome.into(),
+            outcome: outcome.clone().into(),
         },
-        TestnetUpdate::Bar(snapshot) => {
-            let dto = TestnetSnapshotDto::from(snapshot);
-            inner.latest = Some(dto.clone());
-            TestnetUpdateEvent::Bar { snapshot: dto }
-        }
-        TestnetUpdate::Stopped => {
-            inner.state = RunState::Stopped;
-            TestnetUpdateEvent::Stopped
-        }
-        TestnetUpdate::Failed(error) => {
-            let message = error.to_string();
-            inner.state = RunState::Failed(message.clone());
-            TestnetUpdateEvent::Failed { message }
-        }
+        TestnetUpdate::Bar(snapshot) => TestnetUpdateEvent::Bar {
+            snapshot: TestnetSnapshotDto::from(*snapshot),
+        },
+        TestnetUpdate::Stopped => TestnetUpdateEvent::Stopped,
+        TestnetUpdate::Failed(error) => TestnetUpdateEvent::Failed {
+            message: error.to_string(),
+        },
     }
 }
 
@@ -298,36 +258,172 @@ fn validate_request(
     Ok((symbol, interval, strategy, initial_cash, limits))
 }
 
-/// 背景執行緒本體：逐則轉發成前端事件、順手更新共用狀態。每次只短暫鎖一下
-/// 共用狀態（理由見模組文件），不是整段佔住。出口跟
-/// [`at_testnet_trading::spawn`] 文件描述的一致：停止旗標、行情 channel
-/// 關閉、消費端不在了、交易邏輯回錯誤，全部正常結束、不 panic——這裡對應的
-/// 是 `Err(RecvTimeoutError::Disconnected)`，channel 關閉就結束這個執行緒。
-fn forward_updates(app: AppHandle) {
-    let state = app.state::<TestnetTradingState>();
+/// 收尾：把這場 session 的最終狀態寫進 store、從 registry 移除、
+/// emit 詳細事件與 `session-registry-changed`。
+fn finalize(
+    app: &AppHandle,
+    registry: &SessionRegistry,
+    entry: &SessionEntry,
+    status: LiveStatus,
+    message: Option<String>,
+    last_snapshot: Option<&TestnetSnapshotDto>,
+    event: TestnetUpdateEvent,
+) {
+    entry.update_live(|live| {
+        live.status = status;
+        live.status_message = message.clone();
+    });
+
+    let curve = registry
+        .store()
+        .read_curve(entry.id.as_str(), None)
+        .unwrap_or_default();
+    let mut record = new_running_record(&entry.meta, &entry.id);
+    record.ended_at_ms = Some(last_snapshot.map(|s| s.open_time).unwrap_or_else(now_ms));
+    record.status = match status {
+        LiveStatus::Stopped => at_session_store::SessionStatus::Stopped,
+        LiveStatus::Failed => at_session_store::SessionStatus::Failed,
+        LiveStatus::Running => at_session_store::SessionStatus::Running,
+    };
+    record.status_message = message;
+    record.final_equity = last_snapshot.map(|s| s.equity.clone());
+    record.bars_seen = entry.live_snapshot().bars_seen;
+    record.metrics = crate::session_registry::metrics_from_curve(&curve);
+    record.counters = at_session_store::SessionCounters {
+        fills: last_snapshot.map(|s| s.fills as u64),
+        blocked: last_snapshot.map(|s| s.blocked as u64),
+        fees_paid: last_snapshot.map(|s| s.fees_paid.clone()),
+        ..Default::default()
+    };
+    if let Err(e) = registry.store().upsert_session(record) {
+        eprintln!("寫入測試網交易收尾紀錄失敗：{e}");
+    }
+
+    let _ = app.emit(
+        TESTNET_TRADING_EVENT,
+        &TestnetUpdateEnvelope {
+            session_id: entry.id.as_str(),
+            event,
+        },
+    );
+    let change = match status {
+        LiveStatus::Failed => "failed",
+        _ => "stopped",
+    };
+    let _ = app.emit(
+        SESSION_REGISTRY_CHANGED_EVENT,
+        &SessionRegistryChangedEvent {
+            session_id: entry.id.as_str().to_string(),
+            change,
+        },
+    );
+    registry.remove(&entry.id);
+}
+
+/// 背景執行緒本體：逐則轉發成前端事件、順手更新 `LiveState`／
+/// `last_snapshot`、寫曲線檔。每次只短暫鎖一下 [`SessionEntry::control`]
+/// （理由見模組文件），不是整段佔住。出口跟 [`at_testnet_trading::spawn`]
+/// 文件描述的一致：停止旗標、行情 channel 關閉、消費端不在了、交易邏輯回
+/// 錯誤，全部正常結束、不 panic——這裡對應的是
+/// `Err(RecvTimeoutError::Disconnected)`，channel 關閉就結束這個執行緒。
+fn forward_updates(app: AppHandle, id: SessionId) {
+    let registry = app.state::<SessionRegistry>();
+    let entry = match registry.get(&id) {
+        Some(entry) => entry,
+        None => return,
+    };
+    let mut last_snapshot: Option<TestnetSnapshotDto> = None;
+
     loop {
-        let received = {
-            let inner = match state.0.lock() {
-                Ok(inner) => inner,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            match &inner.handle {
-                Some(handle) => handle.updates.recv_timeout(RECV_POLL_INTERVAL),
-                // 理論上不會發生：這個執行緒是 start_testnet_trading 設好
-                // handle 之後才開的。保守起見還是結束，不要空轉。
-                None => return,
-            }
-        };
+        let received = entry.with_control(|control| match control {
+            SessionControl::Testnet(handle) => handle.updates.recv_timeout(RECV_POLL_INTERVAL),
+            _ => Err(RecvTimeoutError::Disconnected),
+        });
+
         match received {
             Ok(update) => {
-                let event = match state.0.lock() {
-                    Ok(mut inner) => apply_update(&mut inner, update),
-                    Err(poisoned) => apply_update(&mut poisoned.into_inner(), update),
-                };
-                let _ = app.emit(TESTNET_TRADING_EVENT, &event);
+                let event = to_event(&update);
+                match &update {
+                    TestnetUpdate::Order(_) => {
+                        // 下單結果不改變執行狀態，只轉發事件，不動 LiveState/曲線。
+                        let _ = app.emit(
+                            TESTNET_TRADING_EVENT,
+                            &TestnetUpdateEnvelope {
+                                session_id: id.as_str(),
+                                event,
+                            },
+                        );
+                    }
+                    TestnetUpdate::Bar(snapshot) => {
+                        let dto = TestnetSnapshotDto::from(*snapshot);
+                        last_snapshot = Some(dto.clone());
+                        entry.set_last_snapshot(&dto);
+                        entry.update_live(|live| {
+                            live.equity = Some(snapshot.point.equity);
+                            live.position = snapshot.position;
+                            live.daily_pnl = snapshot.daily_pnl;
+                            live.as_of_ms = Some(snapshot.point.open_time);
+                            live.bars_seen += 1;
+                            live.kill_switch = Some(snapshot.kill_switch);
+                        });
+                        let _ = registry
+                            .store()
+                            .append_curve_point(id.as_str(), snapshot.point);
+                        let _ = app.emit(
+                            TESTNET_TRADING_EVENT,
+                            &TestnetUpdateEnvelope {
+                                session_id: id.as_str(),
+                                event,
+                            },
+                        );
+                        let _ = app.emit(
+                            SESSION_REGISTRY_CHANGED_EVENT,
+                            &SessionRegistryChangedEvent {
+                                session_id: id.as_str().to_string(),
+                                change: "tick",
+                            },
+                        );
+                    }
+                    TestnetUpdate::Stopped => {
+                        finalize(
+                            &app,
+                            &registry,
+                            &entry,
+                            LiveStatus::Stopped,
+                            None,
+                            last_snapshot.as_ref(),
+                            event,
+                        );
+                        return;
+                    }
+                    TestnetUpdate::Failed(error) => {
+                        let message = error.to_string();
+                        finalize(
+                            &app,
+                            &registry,
+                            &entry,
+                            LiveStatus::Failed,
+                            Some(message),
+                            last_snapshot.as_ref(),
+                            event,
+                        );
+                        return;
+                    }
+                }
             }
             Err(RecvTimeoutError::Timeout) => continue,
-            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                finalize(
+                    &app,
+                    &registry,
+                    &entry,
+                    LiveStatus::Stopped,
+                    None,
+                    last_snapshot.as_ref(),
+                    TestnetUpdateEvent::Stopped,
+                );
+                return;
+            }
         }
     }
 }
@@ -335,21 +431,18 @@ fn forward_updates(app: AppHandle) {
 /// 測試網交易頁面（6.5）的「開始」command：讀測試網金鑰、用正式環境金鑰
 /// 同步費率/下單規則（6.4 既定設計：測試網手續費不可信，下單規則用公開
 /// 端點）、組設定、接上即時行情、送進 [`at_testnet_trading::spawn`]。
+/// 回傳新開的這場 session 的 id。
 #[tauri::command]
 pub fn start_testnet_trading(
     app: AppHandle,
     request: StartTestnetTradingRequest,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let (symbol, interval, strategy, initial_cash, limits) = validate_request(&request)?;
+    let strategy_name = crate::backtest::strategy_display_name(&request.strategy_id)?;
 
-    let state = app.state::<TestnetTradingState>();
-    let mut inner = state
-        .0
-        .lock()
-        .map_err(|_| "測試網交易狀態鎖定失敗".to_string())?;
-    if inner.state == RunState::Running {
-        return Err("測試網交易已經在執行中，請先停止目前的交易".to_string());
-    }
+    let registry = app.state::<SessionRegistry>();
+    let started_at_ms = now_ms();
+    let id = registry.generate_id(at_core::RunMode::Testnet, started_at_ms);
 
     let client = BinanceTestnetClient::from_keychain()
         .map_err(|e| format!("讀取測試網 API 金鑰失敗：{e}。請先在本頁設定測試網金鑰"))?;
@@ -396,61 +489,162 @@ pub fn start_testnet_trading(
         }
     };
 
-    inner.state = RunState::Running;
-    inner.handle = Some(handle);
-    inner.latest = None;
-    drop(inner);
+    let meta = SessionMeta {
+        kind: at_core::RunMode::Testnet,
+        market: at_core::Market::Spot,
+        symbol: symbol.to_string(),
+        interval: request.interval.clone(),
+        strategy_id: request.strategy_id.clone(),
+        strategy_name,
+        params: request.params.clone().into_iter().collect(),
+        starting_capital: initial_cash,
+        started_at_ms,
+        cost_assumptions: at_session_store::CostAssumptions {
+            fee_model: Some("testnet_synced_fees".to_string()),
+            slippage: Some("0".to_string()),
+            funding_rate: Some("0".to_string()),
+            maintenance_margin_rate: None,
+        },
+    };
+
+    let entry = Arc::new(SessionEntry::new(
+        id.clone(),
+        meta.clone(),
+        SessionControl::Testnet(handle),
+    ));
+    if let Err(err) = registry.insert(entry.clone()) {
+        entry.with_control(|control| {
+            if let SessionControl::Testnet(handle) = control {
+                handle.stop();
+            }
+        });
+        return Err(err);
+    }
+
+    if let Err(e) = registry
+        .store()
+        .upsert_session(new_running_record(&meta, &id))
+    {
+        eprintln!("寫入測試網交易初始紀錄失敗：{e}");
+    }
+    let _ = app.emit(
+        SESSION_REGISTRY_CHANGED_EVENT,
+        &SessionRegistryChangedEvent {
+            session_id: id.as_str().to_string(),
+            change: "started",
+        },
+    );
 
     let app_for_thread = app.clone();
-    thread::spawn(move || forward_updates(app_for_thread));
-    Ok(())
+    let id_for_thread = id.clone();
+    thread::spawn(move || forward_updates(app_for_thread, id_for_thread));
+    Ok(id.into_string())
 }
 
 /// 真正收工：連底層行情連線都結束。跟一鍵停止是兩個獨立的按鈕
 /// （見模組文件與 `at_testnet_trading` 的 crate 文件）。
 #[tauri::command]
-pub fn stop_testnet_trading(app: AppHandle) -> Result<(), String> {
-    let state = app.state::<TestnetTradingState>();
-    let inner = state
-        .0
-        .lock()
-        .map_err(|_| "測試網交易狀態鎖定失敗".to_string())?;
-    if inner.state != RunState::Running {
-        return Err("目前沒有正在執行的測試網交易".to_string());
-    }
-    if let Some(handle) = &inner.handle {
-        handle.stop();
-    }
-    Ok(())
+pub fn stop_testnet_trading(app: AppHandle, session_id: String) -> Result<(), String> {
+    let registry = app.state::<SessionRegistry>();
+    let id = SessionId::from_raw(session_id);
+    let entry = registry
+        .get(&id)
+        .ok_or_else(|| format!("找不到這場交易（可能已經停止）：{}", id.as_str()))?;
+    entry.with_control(|control| match control {
+        SessionControl::Testnet(handle) => {
+            handle.stop();
+            Ok(())
+        }
+        _ => Err("這場 session 不是測試網交易".to_string()),
+    })
 }
 
 /// 一鍵停止：只擋送單，行情與快照照常跑。跟 [`stop_testnet_trading`]
 /// 是兩個獨立的開關，可以在交易執行中隨時切換。
 #[tauri::command]
-pub fn set_testnet_kill_switch(app: AppHandle, on: bool) -> Result<(), String> {
-    let state = app.state::<TestnetTradingState>();
-    let inner = state
-        .0
-        .lock()
-        .map_err(|_| "測試網交易狀態鎖定失敗".to_string())?;
-    let handle = inner
-        .handle
-        .as_ref()
-        .ok_or_else(|| "目前沒有正在執行的測試網交易".to_string())?;
-    handle.set_kill_switch(on);
-    Ok(())
+pub fn set_testnet_kill_switch(app: AppHandle, session_id: String, on: bool) -> Result<(), String> {
+    let registry = app.state::<SessionRegistry>();
+    let id = SessionId::from_raw(session_id);
+    let entry = registry
+        .get(&id)
+        .ok_or_else(|| format!("找不到這場交易（可能已經停止）：{}", id.as_str()))?;
+    entry.with_control(|control| match control {
+        SessionControl::Testnet(handle) => {
+            handle.set_kill_switch(on);
+            Ok(())
+        }
+        _ => Err("這場 session 不是測試網交易".to_string()),
+    })
 }
 
 /// 測試網交易頁面（6.5）的查詢 command：畫面重新掛載/切回來時，補上最後
 /// 已知狀態，不用等下一個事件才有東西可看。
+///
+/// 已經停止/失敗的 session 會在收尾時離開 registry（§7.4 簡化版），但畫面會在
+/// 使用者切頁籤時整個 unmount/remount，這時候不能直接回 `Idle`——這裡是會
+/// 真的送出測試網訂單的頁面，使用者更需要知道「這場到底停在哪裡、有沒有
+/// 失敗」，不能讓畫面悄悄變回「從沒開始過」。查 registry 落空時退而查 store
+/// 裡的收尾紀錄，真的連紀錄都沒有才是 `Idle`。
 #[tauri::command]
-pub fn testnet_trading_status(app: AppHandle) -> Result<TestnetTradingStatusDto, String> {
-    let state = app.state::<TestnetTradingState>();
-    let inner = state
-        .0
-        .lock()
-        .map_err(|_| "測試網交易狀態鎖定失敗".to_string())?;
-    Ok(status_dto(&inner))
+pub fn testnet_trading_status(
+    app: AppHandle,
+    session_id: String,
+) -> Result<TestnetTradingStatusDto, String> {
+    let registry = app.state::<SessionRegistry>();
+    let id = SessionId::from_raw(session_id);
+    let Some(entry) = registry.get(&id) else {
+        return Ok(status_from_store(&registry, id.as_str()));
+    };
+    let live = entry.live_snapshot();
+    let snapshot = entry.last_snapshot::<TestnetSnapshotDto>();
+    Ok(match live.status {
+        LiveStatus::Running => TestnetTradingStatusDto::Running { snapshot },
+        LiveStatus::Stopped => TestnetTradingStatusDto::Stopped { snapshot },
+        LiveStatus::Failed => TestnetTradingStatusDto::Failed {
+            snapshot,
+            message: live.status_message.unwrap_or_default(),
+        },
+    })
+}
+
+/// 在 registry 裡找不到這場 session 時的退路：查 `at_session_store` 的收尾
+/// 紀錄。沒有詳細帳本快照，但至少讓畫面照實顯示「這場已經停止/失敗」而不是
+/// 「從沒開始過」——這個頁面會真的送單，誤導使用者以為自己沒跑過的代價比
+/// 其他頁面高。
+fn status_from_store(registry: &SessionRegistry, id: &str) -> TestnetTradingStatusDto {
+    let filter = at_session_store::SessionFilter {
+        limit: Some(at_session_store::MAX_LIST_LIMIT),
+        ..Default::default()
+    };
+    let record = registry
+        .store()
+        .list_sessions(&filter)
+        .ok()
+        .and_then(|records| records.into_iter().find(|r| r.id == id));
+    match record {
+        Some(r) => match r.status {
+            at_session_store::SessionStatus::Stopped
+            | at_session_store::SessionStatus::Completed => {
+                TestnetTradingStatusDto::Stopped { snapshot: None }
+            }
+            at_session_store::SessionStatus::Failed => TestnetTradingStatusDto::Failed {
+                snapshot: None,
+                message: r
+                    .status_message
+                    .unwrap_or_else(|| "交易中止，原因不明".to_string()),
+            },
+            at_session_store::SessionStatus::Interrupted => TestnetTradingStatusDto::Failed {
+                snapshot: None,
+                message:
+                    "App 關閉時這場還在執行，帳本從中斷那一刻起不可信，請到測試網後台確認實際部位"
+                        .to_string(),
+            },
+            // 紀錄還是 Running 但 registry 已經沒有它：只會發生在收尾寫檔跟
+            // registry.remove 短暫不同步的瞬間。不確定就回 Idle。
+            at_session_store::SessionStatus::Running => TestnetTradingStatusDto::Idle,
+        },
+        None => TestnetTradingStatusDto::Idle,
+    }
 }
 
 #[cfg(test)]
@@ -470,6 +664,114 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    // ---- 回歸測試：離開 registry 之後，畫面重新掛載不該看到 Idle ----
+    // （比照 paper_trading.rs 的同一個回歸測試：這個頁面會真的送出測試網
+    // 訂單，誤導使用者以為自己沒跑過這場的代價比其他頁面更高。）
+
+    fn status_test_registry(name: &str) -> SessionRegistry {
+        let dir = std::env::temp_dir().join(format!(
+            "at_app_testnet_trading_status_from_store_test_{}_{name}_{}",
+            std::process::id(),
+            now_ms(),
+        ));
+        SessionRegistry::new(Arc::new(at_session_store::SessionStore::new(dir)))
+    }
+
+    fn stub_record(
+        id: &str,
+        status: at_session_store::SessionStatus,
+    ) -> at_session_store::SessionRecord {
+        at_session_store::SessionRecord {
+            schema_version: at_session_store::CURRENT_SCHEMA_VERSION,
+            id: id.to_string(),
+            kind: at_core::RunMode::Testnet,
+            market: at_core::Market::Spot,
+            symbol: "BTCUSDT".to_string(),
+            interval: "1m".to_string(),
+            strategy_id: "sma_cross".to_string(),
+            strategy_name: "均線交叉".to_string(),
+            params: Default::default(),
+            started_at_ms: 1_000,
+            ended_at_ms: Some(2_000),
+            status,
+            status_message: None,
+            starting_capital: "10000".to_string(),
+            final_equity: Some("10123.45".to_string()),
+            bars_seen: 42,
+            metrics: None,
+            counters: Default::default(),
+            cost_assumptions: Default::default(),
+            saved: false,
+            data_source_path: None,
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn a_stopped_session_gone_from_the_registry_still_reports_stopped() {
+        let registry = status_test_registry("stopped");
+        registry
+            .store()
+            .upsert_session(stub_record(
+                "testnet-stopped-001",
+                at_session_store::SessionStatus::Stopped,
+            ))
+            .unwrap();
+
+        let result = status_from_store(&registry, "testnet-stopped-001");
+        assert!(
+            matches!(result, TestnetTradingStatusDto::Stopped { snapshot: None }),
+            "應該照 store 裡的紀錄回報已停止，不是 Idle：{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_session_gone_from_the_registry_still_reports_the_failure_message() {
+        let registry = status_test_registry("failed");
+        let mut record = stub_record(
+            "testnet-failed-001",
+            at_session_store::SessionStatus::Failed,
+        );
+        record.status_message = Some("送單失敗：HTTP 狀態碼 502".to_string());
+        registry.store().upsert_session(record).unwrap();
+
+        let result = status_from_store(&registry, "testnet-failed-001");
+        let TestnetTradingStatusDto::Failed { snapshot, message } = result else {
+            panic!("應該照 store 裡的紀錄回報失敗，不是 Idle：{result:?}");
+        };
+        assert!(snapshot.is_none());
+        assert_eq!(message, "送單失敗：HTTP 狀態碼 502");
+    }
+
+    #[test]
+    fn an_interrupted_session_warns_about_unreliable_positions() {
+        let registry = status_test_registry("interrupted");
+        registry
+            .store()
+            .upsert_session(stub_record(
+                "testnet-interrupted-001",
+                at_session_store::SessionStatus::Interrupted,
+            ))
+            .unwrap();
+
+        let result = status_from_store(&registry, "testnet-interrupted-001");
+        let TestnetTradingStatusDto::Failed { message, .. } = result else {
+            panic!("App 當掉留下的孤兒紀錄應該回報失敗，不是 Idle：{result:?}");
+        };
+        assert!(message.contains("中斷"));
+        assert!(
+            message.contains("測試網後台"),
+            "應該提醒使用者去測試網後台確認實際部位"
+        );
+    }
+
+    #[test]
+    fn a_session_id_with_no_record_anywhere_is_genuinely_idle() {
+        let registry = status_test_registry("never-existed");
+        let result = status_from_store(&registry, "testnet-never-existed-001");
+        assert!(matches!(result, TestnetTradingStatusDto::Idle));
     }
 
     fn request(
@@ -602,7 +904,7 @@ mod tests {
         assert_eq!(err, "不支援的策略代號：not_a_strategy");
     }
 
-    // ---- apply_update / status_dto：狀態機本身 ----
+    // ---- to_event：TestnetUpdate → 前端事件的轉換 ----
 
     fn snapshot(open_time: i64, equity: &str, kill_switch: bool) -> TestnetSnapshot {
         TestnetSnapshot {
@@ -621,40 +923,19 @@ mod tests {
     }
 
     #[test]
-    fn default_state_is_idle() {
-        let inner = Inner::default();
-        assert!(matches!(status_dto(&inner), TestnetTradingStatusDto::Idle));
+    fn bar_update_translates_to_a_bar_event_with_the_dto() {
+        let event = to_event(&TestnetUpdate::Bar(snapshot(1000, "10050", false)));
+        match event {
+            TestnetUpdateEvent::Bar { snapshot } => assert_eq!(snapshot.equity, "10050"),
+            other => panic!("預期 Bar 事件，收到 {other:?}"),
+        }
     }
 
     #[test]
-    fn bar_update_records_latest_snapshot_without_changing_a_running_state() {
-        let mut inner = Inner {
-            state: RunState::Running,
-            ..Inner::default()
-        };
-        let event = apply_update(
-            &mut inner,
-            TestnetUpdate::Bar(snapshot(1000, "10050", false)),
-        );
-
-        assert!(matches!(event, TestnetUpdateEvent::Bar { .. }));
-        assert_eq!(inner.state, RunState::Running);
-        assert_eq!(
-            inner.latest.as_ref().map(|s| s.equity.as_str()),
-            Some("10050")
-        );
-    }
-
-    #[test]
-    fn order_update_does_not_touch_the_run_state() {
-        let mut inner = Inner {
-            state: RunState::Running,
-            ..Inner::default()
-        };
-        let event = apply_update(
-            &mut inner,
-            TestnetUpdate::Order(OrderOutcome::Blocked(Blocked::KillSwitch)),
-        );
+    fn order_update_translates_to_an_order_event() {
+        let event = to_event(&TestnetUpdate::Order(OrderOutcome::Blocked(
+            Blocked::KillSwitch,
+        )));
         match event {
             TestnetUpdateEvent::Order { outcome } => {
                 assert_eq!(
@@ -666,7 +947,6 @@ mod tests {
             }
             other => panic!("預期 Order 事件，收到 {other:?}"),
         }
-        assert_eq!(inner.state, RunState::Running, "下單結果不該改變執行狀態");
     }
 
     #[test]
@@ -696,58 +976,25 @@ mod tests {
     }
 
     #[test]
-    fn stopped_update_moves_state_to_stopped_and_keeps_the_last_snapshot() {
-        let mut inner = Inner {
-            state: RunState::Running,
-            ..Inner::default()
-        };
-        apply_update(
-            &mut inner,
-            TestnetUpdate::Bar(snapshot(1000, "10050", false)),
-        );
-        let event = apply_update(&mut inner, TestnetUpdate::Stopped);
-
-        assert!(matches!(event, TestnetUpdateEvent::Stopped));
-        assert_eq!(inner.state, RunState::Stopped);
-        match status_dto(&inner) {
-            TestnetTradingStatusDto::Stopped {
-                snapshot: Some(dto),
-            } => assert_eq!(dto.equity, "10050"),
-            other => panic!("預期 Stopped 並帶著最後快照，收到 {other:?}"),
-        }
+    fn stopped_update_translates_to_a_stopped_event() {
+        assert!(matches!(
+            to_event(&TestnetUpdate::Stopped),
+            TestnetUpdateEvent::Stopped
+        ));
     }
 
     #[test]
-    fn failed_update_moves_state_to_failed_with_the_error_message() {
-        let mut inner = Inner {
-            state: RunState::Running,
-            ..Inner::default()
-        };
-        let event = apply_update(&mut inner, TestnetUpdate::Failed(TradingError::Arithmetic));
-
+    fn failed_update_translates_to_a_failed_event_with_the_error_message() {
+        let event = to_event(&TestnetUpdate::Failed(TradingError::Arithmetic));
         let TestnetUpdateEvent::Failed { message } = event else {
             panic!("預期 Failed 事件");
         };
-        assert_eq!(inner.state, RunState::Failed(message.clone()));
-        match status_dto(&inner) {
-            TestnetTradingStatusDto::Failed { message: m, .. } => assert_eq!(m, message),
-            other => panic!("預期 Failed，收到 {other:?}"),
-        }
+        assert!(!message.is_empty());
     }
 
     #[test]
-    fn kill_switch_flag_is_carried_through_the_snapshot() {
-        let mut inner = Inner {
-            state: RunState::Running,
-            ..Inner::default()
-        };
-        apply_update(
-            &mut inner,
-            TestnetUpdate::Bar(snapshot(1000, "10050", true)),
-        );
-        assert!(
-            inner.latest.as_ref().unwrap().kill_switch,
-            "一鍵停止狀態要跟著快照一起顯示，不必額外呼叫 handle"
-        );
+    fn kill_switch_flag_is_carried_through_the_snapshot_dto() {
+        let dto = TestnetSnapshotDto::from(snapshot(1000, "10050", true));
+        assert!(dto.kill_switch, "一鍵停止狀態要跟著快照一起顯示");
     }
 }

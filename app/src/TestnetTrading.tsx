@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -8,7 +8,7 @@ import type {
   StartTestnetTradingRequest,
   TestnetSnapshot,
   TestnetTradingStatus,
-  TestnetUpdateEvent,
+  TestnetUpdateEnvelope,
 } from "./testnetTradingTypes";
 import { TESTNET_TRADING_EVENT } from "./testnetTradingTypes";
 import type { TestnetCredentialStatus } from "./testnetSettingsTypes";
@@ -23,6 +23,11 @@ interface TestnetTradingProps {
 type Phase = "idle" | "running" | "stopped" | "failed";
 type SaveStatus = "idle" | "saving" | "success" | "error";
 type ClearStatus = "idle" | "clearing" | "error";
+
+// 理由同 PaperTrading.tsx：畫面只看「現在這一場」，但 command 介面改成
+// 多 session 之後每個 command 都要帶 sessionId，存進 localStorage 讓
+// 重新整理/切回這一頁時還能查到同一場的狀態。
+const SESSION_ID_STORAGE_KEY = "testnetTrading.sessionId";
 
 function statusLabel(isSet: boolean): string {
   return isSet ? "已設定" : "未設定";
@@ -80,6 +85,14 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
   const [submitted, setSubmitted] = useState(false);
 
   // ---- 執行狀態 ----
+  const [sessionId, setSessionId] = useState<string | null>(() =>
+    localStorage.getItem(SESSION_ID_STORAGE_KEY),
+  );
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
   const [phase, setPhase] = useState<Phase>("idle");
   const [curve, setCurve] = useState<TestnetSnapshot[]>([]);
   const [latest, setLatest] = useState<TestnetSnapshot | null>(null);
@@ -121,7 +134,8 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
 
   // 頁面掛載/切回來時，補上最後已知狀態，理由同 PaperTrading.tsx。
   useEffect(() => {
-    invoke<TestnetTradingStatus>("testnet_trading_status")
+    if (!sessionId) return;
+    invoke<TestnetTradingStatus>("testnet_trading_status", { sessionId })
       .then((status) => {
         if (status.status === "idle") return;
         setPhase(status.status);
@@ -134,11 +148,13 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
         }
       })
       .catch((err: unknown) => setStatusError(String(err)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = listen<TestnetUpdateEvent>(TESTNET_TRADING_EVENT, (event) => {
+    const unlistenPromise = listen<TestnetUpdateEnvelope>(TESTNET_TRADING_EVENT, (event) => {
       const payload = event.payload;
+      if (payload.sessionId !== sessionIdRef.current) return;
       if (payload.type === "order") {
         setLastOrder(payload.outcome);
       } else if (payload.type === "bar") {
@@ -228,7 +244,9 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
     setFailedMessage(null);
     setLastOrder(null);
     try {
-      await invoke("start_testnet_trading", { request });
+      const newSessionId = await invoke<string>("start_testnet_trading", { request });
+      localStorage.setItem(SESSION_ID_STORAGE_KEY, newSessionId);
+      setSessionId(newSessionId);
       setPhase("running");
     } catch (err) {
       setStartError(String(err));
@@ -238,10 +256,11 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
   }
 
   async function handleStop() {
+    if (!sessionId) return;
     setStopping(true);
     setStopError(null);
     try {
-      await invoke("stop_testnet_trading");
+      await invoke("stop_testnet_trading", { sessionId });
     } catch (err) {
       setStopError(String(err));
     } finally {
@@ -250,10 +269,11 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
   }
 
   async function handleToggleKillSwitch() {
+    if (!sessionId) return;
     setKillSwitchBusy(true);
     setKillSwitchError(null);
     try {
-      await invoke("set_testnet_kill_switch", { on: !killSwitchOn });
+      await invoke("set_testnet_kill_switch", { sessionId, on: !killSwitchOn });
     } catch (err) {
       setKillSwitchError(String(err));
     } finally {

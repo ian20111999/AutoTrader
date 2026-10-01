@@ -70,6 +70,7 @@ dependencies = [
  "at-paper-trading",
  "at-risk-control",
  "at-secrets",
+ "at-session-store",
  "at-testnet-trading",
  "serde",
  "serde_json",
@@ -299,6 +300,15 @@ name = "at-secrets"
 version = "0.1.0"
 dependencies = [
  "keyring",
+]
+
+[[package]]
+name = "at-session-store"
+version = "0.1.0"
+dependencies = [
+ "at-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

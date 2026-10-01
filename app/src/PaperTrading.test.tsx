@@ -5,7 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { PaperTrading } from "./PaperTrading";
 import type { StrategyConfig } from "./strategyTypes";
-import type { PaperTradingStatus, PaperUpdateEvent } from "./paperTradingTypes";
+import type { PaperTradingStatus, PaperUpdateEnvelope } from "./paperTradingTypes";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -32,6 +32,7 @@ const STRATEGY_CONFIG: StrategyConfig = {
 };
 
 const IDLE_STATUS: PaperTradingStatus = { status: "idle" };
+const SESSION_ID = "paper-1000-001";
 
 const SNAPSHOT = {
   openTime: 1_704_067_200_000,
@@ -42,18 +43,19 @@ const SNAPSHOT = {
   liquidations: 0,
 };
 
-type UpdateHandler = (event: { payload: PaperUpdateEvent }) => void;
+type UpdateHandler = (event: { payload: PaperUpdateEnvelope }) => void;
 
 function mockInvoke(options?: {
   status?: PaperTradingStatus;
-  startImpl?: () => Promise<void>;
+  startImpl?: () => Promise<string>;
   stopImpl?: () => Promise<void>;
 }) {
   const status = options?.status ?? IDLE_STATUS;
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === "list_builtin_strategies") return Promise.resolve(STRATEGIES);
     if (cmd === "paper_trading_status") return Promise.resolve(status);
-    if (cmd === "start_paper_trading") return (options?.startImpl ?? (() => Promise.resolve()))();
+    if (cmd === "start_paper_trading")
+      return (options?.startImpl ?? (() => Promise.resolve(SESSION_ID)))();
     if (cmd === "stop_paper_trading") return (options?.stopImpl ?? (() => Promise.resolve()))();
     return Promise.reject(new Error(`unexpected command: ${cmd}`));
   });
@@ -76,6 +78,7 @@ describe("PaperTrading", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(listen).mockReset();
+    localStorage.clear();
   });
 
   it("還沒選策略時顯示提示，點「前往策略庫」呼叫 onGoToStrategies", async () => {
@@ -140,6 +143,7 @@ describe("PaperTrading", () => {
     );
 
     expect(await screen.findByRole("status")).toHaveTextContent("模擬交易執行中");
+    expect(localStorage.getItem("paperTrading.sessionId")).toBe(SESSION_ID);
   });
 
   it("start_paper_trading 失敗時顯示錯誤訊息", async () => {
@@ -164,12 +168,26 @@ describe("PaperTrading", () => {
     fireEvent.click(screen.getByRole("button", { name: "開始模擬" }));
     await screen.findByRole("status");
 
-    emit({ payload: { type: "bar", snapshot: SNAPSHOT } });
+    emit({ payload: { sessionId: SESSION_ID, type: "bar", snapshot: SNAPSHOT } });
 
     expect(await screen.findByRole("region", { name: "模擬交易結果" })).toBeInTheDocument();
     expect(screen.getByText("10062.30")).toBeInTheDocument();
     expect(screen.getByText("0.1")).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("不同 session 的事件會被過濾掉，不更新畫面", async () => {
+    mockInvoke();
+    const { emit } = mockListen();
+
+    render(<PaperTrading strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    await screen.findByText("均線交叉：快線週期5、慢線週期20");
+    fireEvent.click(screen.getByRole("button", { name: "開始模擬" }));
+    await screen.findByRole("status");
+
+    emit({ payload: { sessionId: "paper-other-session", type: "bar", snapshot: SNAPSHOT } });
+
+    expect(screen.queryByRole("region", { name: "模擬交易結果" })).not.toBeInTheDocument();
   });
 
   it("收到 stopped 事件時顯示已停止（不是錯誤樣式）", async () => {
@@ -181,8 +199,8 @@ describe("PaperTrading", () => {
     fireEvent.click(screen.getByRole("button", { name: "開始模擬" }));
     await screen.findByRole("status");
 
-    emit({ payload: { type: "bar", snapshot: SNAPSHOT } });
-    emit({ payload: { type: "stopped" } });
+    emit({ payload: { sessionId: SESSION_ID, type: "bar", snapshot: SNAPSHOT } });
+    emit({ payload: { sessionId: SESSION_ID, type: "stopped" } });
 
     const status = await screen.findByText("已停止模擬交易。");
     expect(status).toHaveAttribute("role", "status");
@@ -198,8 +216,10 @@ describe("PaperTrading", () => {
     fireEvent.click(screen.getByRole("button", { name: "開始模擬" }));
     await screen.findByRole("status");
 
-    emit({ payload: { type: "bar", snapshot: SNAPSHOT } });
-    emit({ payload: { type: "failed", message: "第 3 根 K 線的權益變成負數" } });
+    emit({ payload: { sessionId: SESSION_ID, type: "bar", snapshot: SNAPSHOT } });
+    emit({
+      payload: { sessionId: SESSION_ID, type: "failed", message: "第 3 根 K 線的權益變成負數" },
+    });
 
     const alert = await screen.findByText(
       "模擬交易中止：第 3 根 K 線的權益變成負數（帳本已經不可信，請重新開始）",
@@ -207,21 +227,24 @@ describe("PaperTrading", () => {
     expect(alert).toHaveAttribute("role", "alert");
   });
 
-  it("點「停止模擬」呼叫 stop_paper_trading", async () => {
+  it("點「停止模擬」帶 sessionId 呼叫 stop_paper_trading", async () => {
     mockInvoke();
     const { emit } = mockListen();
     render(<PaperTrading strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
     await screen.findByText("均線交叉：快線週期5、慢線週期20");
     fireEvent.click(screen.getByRole("button", { name: "開始模擬" }));
     await screen.findByRole("status");
-    emit({ payload: { type: "bar", snapshot: SNAPSHOT } });
+    emit({ payload: { sessionId: SESSION_ID, type: "bar", snapshot: SNAPSHOT } });
 
     fireEvent.click(await screen.findByRole("button", { name: "停止模擬" }));
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("stop_paper_trading"));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("stop_paper_trading", { sessionId: SESSION_ID }),
+    );
   });
 
-  it("頁面掛載時查詢狀態，若已在執行中就直接補上畫面", async () => {
+  it("頁面掛載時若 localStorage 記得 sessionId 就查詢狀態，已在執行中就直接補上畫面", async () => {
+    localStorage.setItem("paperTrading.sessionId", SESSION_ID);
     mockInvoke({ status: { status: "running", snapshot: SNAPSHOT } });
     mockListen();
 
@@ -231,9 +254,21 @@ describe("PaperTrading", () => {
     expect(await screen.findByRole("region", { name: "模擬交易結果" })).toBeInTheDocument();
     expect(screen.getByText("10062.30")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "停止模擬" })).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("paper_trading_status", { sessionId: SESSION_ID });
+  });
+
+  it("頁面掛載時沒有記得的 sessionId 就不查詢狀態", async () => {
+    mockInvoke();
+    mockListen();
+
+    render(<PaperTrading strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
+    await screen.findByText("均線交叉：快線週期5、慢線週期20");
+
+    expect(invoke).not.toHaveBeenCalledWith("paper_trading_status", expect.anything());
   });
 
   it("頁面掛載時查詢狀態，若上次是失敗結束就顯示錯誤訊息與最後快照", async () => {
+    localStorage.setItem("paperTrading.sessionId", SESSION_ID);
     mockInvoke({
       status: { status: "failed", snapshot: SNAPSHOT, message: "第 5 根 K 線的價格不是正數" },
     });
