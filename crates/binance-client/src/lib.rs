@@ -1,4 +1,4 @@
-//! Binance REST API 唯讀 client：HMAC-SHA256 簽名機制 + 打 GET 請求。
+//! Binance REST API client：HMAC-SHA256 簽名機制 + 打 GET 請求。
 //!
 //! 兩種端點分開兩條路：
 //!
@@ -8,12 +8,17 @@
 //! 只提供「送出 GET」這個骨架，不解析各端點的回應結構——那是後續串接步驟
 //! （4.3 帳戶費率、4.4 下單規則）各自的工作，這裡只回傳原始 JSON 字串。
 //!
+//! [`testnet`] 子模組是 ROADMAP 6.2 的測試網下單（獨立型別，見該模組文件
+//! 說明為什麼不跟這裡的 [`BinanceClient`] 共用 `base_url`）。
+//!
 //! # 安全設計
 //!
 //! - [`BinanceError`] 的所有變體都只包含固定的中文說明或 HTTP 狀態碼，絕對
 //!   不包含 API Secret、算出來的簽名、或送出去的完整 URL（那串 URL 裡含有
 //!   簽名過的 query string）。
 //! - [`sign`] 只回傳簽名結果本身；呼叫端要自行負責不要把回傳值印出來。
+
+pub mod testnet;
 
 use at_secrets::{CredentialStore, KeychainStore, SecretError, SecretValue};
 use hmac::{Hmac, KeyInit, Mac};
