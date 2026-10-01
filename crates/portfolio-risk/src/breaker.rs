@@ -470,6 +470,10 @@ pub struct EquitySample {
 /// 連續筆數就不明。序列開頭就已經有部位（例如 App 重啟接手）時，第一筆的起點
 /// 權益不明，同樣回 `None`。
 ///
+/// **起點不明是在建倉時就回 `None`，不是等平倉才回。** 抱著一個起點不明的部位
+/// 期間，我們對「之前虧了幾筆」一無所知，這時候回 `Some(0)`（看起來沒虧過）
+/// 等於放行，而且同一個不明狀態只因為觀測時機不同就從擋變成放行。
+///
 /// 不明是會恢復的：之後只要出現**一筆賺錢的交易**，連續虧損就重新從 0 算起。
 /// 這是刻意的——「不知道」不該把策略永久鎖死，但在恢復之前一律擋。
 pub fn consecutive_losses(samples: &[EquitySample]) -> Option<u32> {
@@ -481,6 +485,12 @@ pub fn consecutive_losses(samples: &[EquitySample]) -> Option<u32> {
 
     for sample in samples {
         if !sample.position.is_zero() {
+            if flat_equity.is_none() {
+                // 抱著部位、而且這一筆的起點權益不明（序列從有部位開始，或上一次
+                // 空手時的權益算不出來）→ 筆數立刻不明。不等它平倉才說不明：等的
+                // 那段期間會回 Some(0)，也就是「看起來沒虧過」而放行。
+                run = None;
+            }
             opened = true;
             continue;
         }
@@ -965,7 +975,9 @@ mod tests {
         let samples = [flat(1_000), holding(900)];
         assert_eq!(consecutive_losses(&samples), Some(0));
         // 永遠不回到空手的策略永遠不會累積筆數——這是已知限制，不是 bug。
-        let never_flat = [holding(1_000), holding(500), holding(100)];
+        // （前提是起點權益是知道的，也就是序列從空手開始。整條序列都抱著部位的
+        // 情形見 `consecutive_losses_does_not_drift_open_while_holding_with_an_unknown_basis`。）
+        let never_flat = [flat(1_000), holding(500), holding(100)];
         assert_eq!(consecutive_losses(&never_flat), Some(0));
     }
 
@@ -1035,6 +1047,123 @@ mod tests {
             sample(Fixed::ZERO, Some(Fixed::from_raw(i64::MAX))),
         ];
         assert_eq!(consecutive_losses(&samples), None);
+    }
+
+    // ---------- fail-closed：基準不明的那段期間不可以看起來安全 ----------
+
+    #[test]
+    fn consecutive_losses_does_not_drift_open_while_holding_with_an_unknown_basis() {
+        // App 重啟接手，序列開頭就已經有部位：這一筆的起點權益不明，而且在它平倉
+        // 之前我們對「重啟之前虧了幾筆」一無所知。這段期間必須回不明（擋），不能回
+        // Some(0)（放行）——否則同一個「不明」狀態只因為觀測時機不同就從擋變成放行。
+        let still_holding = [holding(1_000), holding(500), holding(100)];
+        assert_eq!(consecutive_losses(&still_holding), None);
+
+        // 對照：同一段序列一旦平倉，本來就已經是不明。上面那個答案必須和這個一致。
+        let then_closed = [holding(1_000), holding(500), holding(100), flat(90)];
+        assert_eq!(consecutive_losses(&then_closed), None);
+    }
+
+    #[test]
+    fn an_unknown_flat_equity_makes_the_next_open_trade_unknown_immediately() {
+        // 空手期間的權益算不出來（不是交易邊界，所以不會立刻算損益），下一次建倉的
+        // 起點權益就不明了。抱著這個部位的期間一樣要擋。
+        let samples = [flat(1_000), sample(Fixed::ZERO, None), holding(900)];
+        assert_eq!(consecutive_losses(&samples), None);
+
+        // 不明是會恢復的：之後一筆算得出來的交易就能重新建立基準。
+        let recovered = [
+            flat(1_000),
+            sample(Fixed::ZERO, None),
+            holding(900),
+            flat(800), // 起點不明 → 這一筆不明
+            holding(810),
+            flat(820), // 基準 800 → 賺 20 → 從 0 重算
+        ];
+        assert_eq!(consecutive_losses(&recovered), Some(0));
+    }
+
+    #[test]
+    fn holding_after_a_known_flat_sample_is_still_just_an_unfinished_trade() {
+        // 反面保證：基準是知道的，只是這一筆還沒結束 → 0，不是不明。
+        // 「永遠不回到空手就永遠不累積筆數」這個已知限制在這裡維持不變。
+        let samples = [flat(1_000), holding(900), holding(800)];
+        assert_eq!(consecutive_losses(&samples), Some(0));
+    }
+
+    // ---------- 以下三個是探索性測試：證明這些情境已經被想過 ----------
+
+    #[test]
+    fn a_loss_while_the_count_is_unknown_cannot_be_turned_into_a_pass() {
+        // 不明期間發生的虧損不會被加進計數（`run.map` 對 None 是 no-op），乍看像是
+        // 「虧損被吃掉了」。但吃掉之後停在 None = 繼續擋，所以沒有放行。
+        let unknown_then_losses = [
+            holding(1_000),
+            flat(980), // 起點不明 → 不明
+            holding(975),
+            flat(970), // 虧，但前面不明 → 仍然不明
+            holding(965),
+            flat(960), // 又虧 → 仍然不明
+        ];
+        assert_eq!(consecutive_losses(&unknown_then_losses), None);
+
+        // 唯一的出口是一筆算得出來而且沒虧的交易。那一刻「最近連續虧損」確實是 0，
+        // 因為最後那一筆沒虧——放行的依據是這一筆，不是把前面的虧損忘掉。
+        let mut cleared = unknown_then_losses.to_vec();
+        cleared.extend([holding(970), flat(980)]);
+        assert_eq!(consecutive_losses(&cleared), Some(0));
+
+        // 而且清零之後的虧損照樣從 1 開始數，不會少算。
+        let mut after = cleared.clone();
+        after.extend([holding(975), flat(970)]);
+        assert_eq!(consecutive_losses(&after), Some(1));
+    }
+
+    #[test]
+    fn a_reversal_without_a_flat_sample_collapses_two_legs_into_one_trade() {
+        // 由多翻空、中間沒有任何 position == 0 的取樣：按「一筆 = 空手到空手」的
+        // 定義，這整段只算一筆，損益用頭尾相減。
+        // 多單這一段賺（1000 → 1020）、空單這一段虧（1020 → 1010），合起來是賺，
+        // 所以連續虧損是 0；若改成逐段記帳會是 1。這是定義造成的少算，是已知限制
+        // （和「永遠不回到空手就不累積筆數」同一個根源），不是這個函式算錯。
+        let samples = [
+            flat(1_000),
+            sample(Fixed::ONE, Some(f(1_020))), // 做多，浮盈
+            sample(fx("-1"), Some(f(1_015))),   // 直接反手做空
+            flat(1_010),
+        ];
+        assert_eq!(consecutive_losses(&samples), Some(0));
+
+        // 合起來虧的時候照樣算一筆虧損，所以規則不是完全失效，只是顆粒度較粗。
+        let net_loss = [
+            flat(1_000),
+            sample(Fixed::ONE, Some(f(1_020))),
+            sample(fx("-1"), Some(f(1_015))),
+            flat(990),
+        ];
+        assert_eq!(consecutive_losses(&net_loss), Some(1));
+    }
+
+    #[test]
+    fn equity_moving_while_flat_shifts_the_next_trades_basis_on_purpose() {
+        // 空手期間權益自己掉了 10（例如前一筆的費用晚一拍才結算、或資金費入帳）：
+        // 基準跟著移到 990，所以下一筆 990 → 995 算「賺 5」，連續虧損歸零，即使
+        // 權益比 1000 還低。這是刻意的——非交易造成的權益變化不該記到某一筆交易頭上，
+        // 整體權益下滑由回撤那條規則負責。
+        let samples = [flat(1_000), flat(990), holding(992), flat(995)];
+        assert_eq!(consecutive_losses(&samples), Some(0));
+
+        // 同一段序列的回撤規則會說話：1000 的高點掉到 995 是 0.5% 回撤，門檻設 0.4%
+        // 就會觸發。連續虧損筆數不是用來抓「權益下滑」的工具。
+        let obs = BreakerObservation {
+            consecutive_losses: consecutive_losses(&samples),
+            drawdown: Some(fx("0.005")),
+            ..healthy()
+        };
+        assert!(fires(
+            BreakerTrigger::StrategyDrawdown { ratio: fx("0.004") },
+            &obs
+        ));
     }
 
     #[test]
