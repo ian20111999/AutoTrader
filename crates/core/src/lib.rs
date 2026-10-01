@@ -14,6 +14,7 @@ pub mod rules;
 pub mod strategies;
 pub mod strategy;
 pub mod types;
+pub mod warmup;
 
 pub use backtest::{
     run_backtest, BacktestConfig, BacktestError, BacktestResult, EquityPoint, PaperEngine,
@@ -29,6 +30,7 @@ pub use rules::{RuleViolation, RulesError, SymbolRules};
 pub use strategies::{Bollinger, Donchian, Rsi, SmaCross, StrategyParamError};
 pub use strategy::{DirectionMode, LeveragedStrategy, Strategy, TargetPosition};
 pub use types::{Liquidity, Market, RunMode, Side, Symbol, SymbolError};
+pub use warmup::{warmup_fetch_count, WarmupBars, WARMUP_SAFETY_FACTOR};
 
 /// 目前版本（來自 Cargo.toml）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
