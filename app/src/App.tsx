@@ -55,7 +55,14 @@ function App() {
             />
           )}
           {page === "strategies" && (
-            <Strategies strategyConfig={strategyConfig} onApplyConfig={setStrategyConfig} />
+            <Strategies
+              strategyConfig={strategyConfig}
+              onApplyConfig={setStrategyConfig}
+              onNavigate={(target, config) => {
+                setStrategyConfig(config);
+                setPage(target);
+              }}
+            />
           )}
           {page === "backtest" && (
             <Backtest

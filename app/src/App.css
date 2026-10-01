@@ -254,6 +254,188 @@ a:hover {
   border-color: var(--accent);
 }
 
+.strategy-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.strategy-tab {
+  min-height: 32px;
+  padding: 0 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.strategy-tab--active {
+  background: var(--nav-active);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.strategy-filters {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.strategy-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.strategy-filters select {
+  min-height: 30px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.strategy-empty-state {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.strategy-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+
+.strategy-card__badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.strategy-card__badge--none {
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+}
+
+.strategy-card__badge--paper {
+  background: var(--accent);
+  color: var(--bg-panel);
+}
+
+.strategy-card__badge--testnet {
+  background: var(--warning, #c9880c);
+  color: var(--bg-panel);
+}
+
+.strategy-card__markets {
+  display: flex;
+  gap: 6px;
+}
+
+.strategy-card__market-tag {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.strategy-card__stats {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.strategy-card__stats-loading,
+.strategy-card__stats-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.strategy-card__stats-line {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.strategy-card__metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.strategy-card__metric {
+  display: flex;
+  flex-direction: column;
+}
+
+.strategy-card__metric-label {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.strategy-card__metric-value {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.strategy-card__metric-caveat {
+  font-size: 9px;
+  color: var(--text-secondary);
+}
+
+.strategy-card__sparkline {
+  width: 120px;
+  height: 28px;
+}
+
+.strategy-card__sparkline polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.strategy-card__sparkline-empty {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.strategy-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.strategy-card__action {
+  min-height: 32px;
+  padding: 0 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.strategy-card__action:hover {
+  border-color: var(--accent);
+}
+
 /* 策略調參表單 */
 
 .strategy-param-form {
