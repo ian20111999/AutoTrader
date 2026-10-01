@@ -581,6 +581,208 @@ pub async fn run_buy_hold_baseline_command(
     )
 }
 
+/// 參數穩定度熱力圖（Phase G）一次掃描最多這麼多組參數組合。桌面 App 單機跑、
+/// 使用者自己盯著等結果，每組組合都要重新跑一次完整回測，組合數沒有上限的話
+/// 等待時間會失控；64 組（例如 8×8）在一個月的資料上通常幾秒內跑得完，超過
+/// 就直接拒絕，請使用者縮小候選值範圍，而不是讓畫面卡住不知道發生什麼事。
+pub(crate) const MAX_SWEEP_COMBINATIONS: usize = 64;
+
+/// 參數掃描的一個軸：要掃哪個參數 key、候選值有哪些（字串保留 `Fixed`/整數的
+/// 精確文字表示，跟 `BacktestRequest.params` 同一套慣例）。
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterSweepAxis {
+    pub key: String,
+    pub values: Vec<String>,
+}
+
+/// `run_parameter_sweep_command` 的輸入：跟 `BacktestRequest` 共用大部分欄位
+/// （symbol/interval/區間/市場/方向/槓桿/保證金模式/起始資金），差別是策略參數
+/// 分成「固定不變的 `base_params`」+「要掃描的兩個軸」。只支援內建策略（四個
+/// 查表策略），不支援 `strategy_id == "custom"` 的 DSL 策略——DSL 的參數是巢狀
+/// JSON 樹，沒有「雙參數網格」這種扁平結構可以掃，這次不做。
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterSweepRequest {
+    pub symbol: String,
+    pub interval: String,
+    pub year: u32,
+    pub month: u32,
+    pub strategy_id: String,
+    #[serde(default)]
+    pub base_params: HashMap<String, String>,
+    pub param_x: ParameterSweepAxis,
+    pub param_y: ParameterSweepAxis,
+    pub starting_capital: String,
+    pub market: String,
+    pub direction: String,
+    pub leverage: String,
+    pub margin_mode: Option<String>,
+}
+
+/// 熱力圖上的一個格子：這組 (paramX 值, paramY 值) 組合算出來的年化報酬；
+/// 這組參數組合本身不合法（例如均線交叉快線週期沒有短於慢線週期）就回
+/// `error`、`annualized_return` 是 `None`，前端畫成空格，不是硬湊一個數字。
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterSweepCell {
+    pub param_x_value: String,
+    pub param_y_value: String,
+    pub annualized_return: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterSweepResult {
+    pub param_x_key: String,
+    pub param_y_key: String,
+    pub cells: Vec<ParameterSweepCell>,
+}
+
+/// 純邏輯：拿到 K 線之後，對 `param_x` × `param_y` 的每個組合各跑一次
+/// `summarize_with_strategy`，只取年化報酬組成網格。跟 [`summarize`] 共用市場／
+/// 方向／槓桿／保證金模式的驗證與成本模型解析，不重寫一份。
+fn run_parameter_sweep(
+    bars: &[Bar],
+    request: &ParameterSweepRequest,
+) -> Result<ParameterSweepResult, String> {
+    if request.param_x.values.is_empty() || request.param_y.values.is_empty() {
+        return Err("參數掃描的候選值不可為空".to_string());
+    }
+    let combos = request.param_x.values.len() * request.param_y.values.len();
+    if combos > MAX_SWEEP_COMBINATIONS {
+        return Err(format!(
+            "參數掃描組合數 {combos} 超過上限 {MAX_SWEEP_COMBINATIONS}，請縮小候選值範圍"
+        ));
+    }
+    if request.strategy_id == CUSTOM_STRATEGY_ID {
+        return Err("自訂策略（DSL）目前不支援參數掃描".to_string());
+    }
+
+    let market = parse_market(&request.market)?;
+    let direction = parse_direction(&request.direction)?;
+    let leverage = request
+        .leverage
+        .trim()
+        .parse::<Fixed>()
+        .map_err(|e| format!("槓桿倍數不是合法數字（{}）：{e}", request.leverage))?;
+    if leverage <= Fixed::ZERO {
+        return Err("槓桿倍數必須大於 0".to_string());
+    }
+    let margin_mode = match (market, &request.margin_mode) {
+        (Market::UsdmPerp, Some(raw)) => Some(parse_margin_mode(raw)?),
+        (Market::UsdmPerp, None) => return Err("合約市場必須選擇保證金模式".to_string()),
+        (Market::Spot, _) => None,
+    };
+    if market == Market::Spot {
+        if direction == DirectionMode::LongShort {
+            return Err("現貨市場不支援做空，請把方向切換成「只做多」".to_string());
+        }
+        if leverage != Fixed::ONE {
+            return Err("現貨市場不支援槓桿，請把槓桿設為 1 倍".to_string());
+        }
+    }
+
+    let strategy_name = strategy_display_name(&request.strategy_id)?;
+    let fee_model = match market {
+        Market::Spot => FeeModel::spot_vip0(),
+        Market::UsdmPerp => FeeModel::futures_vip0(),
+    };
+    let fee_model_label = match market {
+        Market::Spot => "spot_vip0（現貨 VIP0，吃單 0.1%）",
+        Market::UsdmPerp => "futures_vip0（合約 VIP0，吃單 0.05%）",
+    };
+    let maintenance_margin_rate = match market {
+        Market::Spot => None,
+        Market::UsdmPerp => Some(at_core::DEFAULT_MAINTENANCE_MARGIN_RATE),
+    };
+
+    let mut cells = Vec::with_capacity(combos);
+    for x_value in &request.param_x.values {
+        for y_value in &request.param_y.values {
+            let mut params = request.base_params.clone();
+            params.insert(request.param_x.key.clone(), x_value.clone());
+            params.insert(request.param_y.key.clone(), y_value.clone());
+
+            let cell_result = build_strategy(&request.strategy_id, &params).and_then(|strategy| {
+                let mut leveraged = LeveragedStrategy::new(strategy, leverage, direction);
+                let session_id = generate_backtest_session_id();
+                summarize_with_strategy(
+                    &session_id,
+                    bars,
+                    &request.symbol,
+                    &request.interval,
+                    request.year,
+                    request.month,
+                    params.clone(),
+                    &request.starting_capital,
+                    &mut leveraged,
+                    &request.strategy_id,
+                    &strategy_name,
+                    Path::new(""),
+                    fee_model,
+                    fee_model_label,
+                    maintenance_margin_rate,
+                    &request.market,
+                    &request.direction,
+                    &leverage.to_string(),
+                    margin_mode.map(|m| m.label_zh()),
+                )
+            });
+
+            cells.push(match cell_result {
+                Ok(summary) => ParameterSweepCell {
+                    param_x_value: x_value.clone(),
+                    param_y_value: y_value.clone(),
+                    annualized_return: summary.annualized_return,
+                    error: None,
+                },
+                Err(e) => ParameterSweepCell {
+                    param_x_value: x_value.clone(),
+                    param_y_value: y_value.clone(),
+                    annualized_return: None,
+                    error: Some(e),
+                },
+            });
+        }
+    }
+
+    Ok(ParameterSweepResult {
+        param_x_key: request.param_x.key.clone(),
+        param_y_key: request.param_y.key.clone(),
+        cells,
+    })
+}
+
+/// 參數穩定度熱力圖（Phase G）用的 Tauri command。K 線讀取／下載沿用
+/// [`load_bars`]；真正掃描的迴圈丟到 `spawn_blocking`——組合數雖然有
+/// [`MAX_SWEEP_COMBINATIONS`] 上限，但終究是數十次完整回測疊加的 CPU 工作，
+/// 不應該卡住 async runtime（跟 `load_bars` 內下載丟 blocking thread 同一個理由）。
+#[tauri::command]
+pub async fn run_parameter_sweep_command(
+    app: tauri::AppHandle,
+    request: ParameterSweepRequest,
+) -> Result<ParameterSweepResult, String> {
+    let symbol = Symbol::new(&request.symbol).map_err(|e| format!("交易對代號不合法：{e}"))?;
+    let interval: Interval = request
+        .interval
+        .parse()
+        .map_err(|e: at_core::ParseIntervalError| e.to_string())?;
+
+    let base_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("找不到應用程式資料目錄：{e}"))?
+        .join("klines");
+
+    let (bars, _path) = load_bars(base_dir, symbol, interval, request.year, request.month).await?;
+
+    tauri::async_runtime::spawn_blocking(move || run_parameter_sweep(&bars, &request))
+        .await
+        .map_err(|e| format!("參數掃描執行任務失敗：{e}"))?
+}
+
 /// 這個月的 K 線本機有就直接讀，沒有就下載（會連網路）。
 async fn load_bars(
     base_dir: PathBuf,
@@ -1179,6 +1381,131 @@ mod tests {
         let result = validate_strategy_ast("{ not json".to_string());
         assert!(!result.valid);
         assert!(result.error.unwrap().contains("DSL JSON 格式錯誤"));
+    }
+
+    fn sweep_request(
+        param_x: ParameterSweepAxis,
+        param_y: ParameterSweepAxis,
+    ) -> ParameterSweepRequest {
+        ParameterSweepRequest {
+            symbol: "BTCUSDT".to_string(),
+            interval: "1h".to_string(),
+            year: 2024,
+            month: 1,
+            strategy_id: "sma_cross".to_string(),
+            base_params: HashMap::new(),
+            param_x,
+            param_y,
+            starting_capital: "10000".to_string(),
+            market: "spot".to_string(),
+            direction: "long_only".to_string(),
+            leverage: "1".to_string(),
+            margin_mode: None,
+        }
+    }
+
+    #[test]
+    fn parameter_sweep_produces_one_cell_per_combination() {
+        let bars = trending_bars();
+        let req = sweep_request(
+            ParameterSweepAxis {
+                key: "fastPeriod".to_string(),
+                values: vec!["3".to_string(), "4".to_string()],
+            },
+            ParameterSweepAxis {
+                key: "slowPeriod".to_string(),
+                values: vec!["8".to_string(), "10".to_string(), "12".to_string()],
+            },
+        );
+        let result = run_parameter_sweep(&bars, &req).unwrap();
+        assert_eq!(result.cells.len(), 6);
+        assert_eq!(result.param_x_key, "fastPeriod");
+        assert_eq!(result.param_y_key, "slowPeriod");
+        // 至少有一格算得出年化報酬（這組快線/慢線在上漲的 trending_bars 上都合法）。
+        assert!(result.cells.iter().any(|c| c.error.is_none()));
+    }
+
+    #[test]
+    fn parameter_sweep_reports_per_cell_error_without_failing_the_whole_grid() {
+        // fastPeriod=50 > slowPeriod=10 違反「快線週期必須短於慢線週期」，這一格
+        // 應該帶著錯誤訊息，不應該讓整個掃描失敗。
+        let bars = trending_bars();
+        let req = sweep_request(
+            ParameterSweepAxis {
+                key: "fastPeriod".to_string(),
+                values: vec!["3".to_string(), "50".to_string()],
+            },
+            ParameterSweepAxis {
+                key: "slowPeriod".to_string(),
+                values: vec!["10".to_string()],
+            },
+        );
+        let result = run_parameter_sweep(&bars, &req).unwrap();
+        assert_eq!(result.cells.len(), 2);
+        let bad_cell = result
+            .cells
+            .iter()
+            .find(|c| c.param_x_value == "50")
+            .unwrap();
+        assert!(bad_cell.annualized_return.is_none());
+        assert!(bad_cell
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("快線週期必須短於慢線週期"));
+    }
+
+    #[test]
+    fn parameter_sweep_rejects_grids_over_the_combination_limit() {
+        let bars = trending_bars();
+        let many_values: Vec<String> = (1..=9).map(|n| n.to_string()).collect();
+        let req = sweep_request(
+            ParameterSweepAxis {
+                key: "fastPeriod".to_string(),
+                values: many_values.clone(),
+            },
+            ParameterSweepAxis {
+                key: "slowPeriod".to_string(),
+                values: many_values,
+            },
+        );
+        let err = run_parameter_sweep(&bars, &req).err().unwrap();
+        assert!(err.contains("超過上限"), "{err}");
+    }
+
+    #[test]
+    fn parameter_sweep_rejects_empty_axis_values() {
+        let bars = trending_bars();
+        let req = sweep_request(
+            ParameterSweepAxis {
+                key: "fastPeriod".to_string(),
+                values: vec![],
+            },
+            ParameterSweepAxis {
+                key: "slowPeriod".to_string(),
+                values: vec!["10".to_string()],
+            },
+        );
+        let err = run_parameter_sweep(&bars, &req).err().unwrap();
+        assert!(err.contains("不可為空"), "{err}");
+    }
+
+    #[test]
+    fn parameter_sweep_rejects_custom_dsl_strategy() {
+        let bars = trending_bars();
+        let mut req = sweep_request(
+            ParameterSweepAxis {
+                key: "a".to_string(),
+                values: vec!["1".to_string()],
+            },
+            ParameterSweepAxis {
+                key: "b".to_string(),
+                values: vec!["1".to_string()],
+            },
+        );
+        req.strategy_id = CUSTOM_STRATEGY_ID.to_string();
+        let err = run_parameter_sweep(&bars, &req).err().unwrap();
+        assert!(err.contains("不支援參數掃描"), "{err}");
     }
 
     #[test]

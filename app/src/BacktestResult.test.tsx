@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { BacktestResult } from "./BacktestResult";
 import type { BacktestSummary } from "./backtestTypes";
 
@@ -36,16 +36,17 @@ const BASE_SUMMARY: BacktestSummary = {
 
 describe("BacktestResult", () => {
   it("顯示四個績效指標的格式化文字", () => {
-    render(<BacktestResult summary={BASE_SUMMARY} />);
+    const { container } = render(<BacktestResult summary={BASE_SUMMARY} />);
+    const metrics = container.querySelector(".backtest-metrics") as HTMLElement;
 
-    expect(screen.getByText("總報酬")).toBeInTheDocument();
-    expect(screen.getByText("+19.8%")).toBeInTheDocument();
-    expect(screen.getByText("年化報酬")).toBeInTheDocument();
-    expect(screen.getByText("+25.0%")).toBeInTheDocument();
-    expect(screen.getByText("最大回撤")).toBeInTheDocument();
-    expect(screen.getByText("−18.3%")).toBeInTheDocument();
-    expect(screen.getByText("夏普值")).toBeInTheDocument();
-    expect(screen.getByText("0.90")).toBeInTheDocument();
+    expect(within(metrics).getByText("總報酬")).toBeInTheDocument();
+    expect(within(metrics).getByText("+19.8%")).toBeInTheDocument();
+    expect(within(metrics).getByText("年化報酬")).toBeInTheDocument();
+    expect(within(metrics).getByText("+25.0%")).toBeInTheDocument();
+    expect(within(metrics).getByText("最大回撤")).toBeInTheDocument();
+    expect(within(metrics).getByText("−18.3%")).toBeInTheDocument();
+    expect(within(metrics).getByText("夏普值")).toBeInTheDocument();
+    expect(within(metrics).getByText("0.90")).toBeInTheDocument();
   });
 
   it("total_return / annualized_return 是 null 時顯示「—」而不是 0", () => {

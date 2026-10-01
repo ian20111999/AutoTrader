@@ -70,3 +70,44 @@ export interface BacktestSummary {
 // at_core::Interval 支援的六個週期，跟 Rust 的 FromStr 一一對應。
 export const INTERVAL_OPTIONS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
 export type IntervalOption = (typeof INTERVAL_OPTIONS)[number];
+
+// 跟 app/src-tauri/src/backtest.rs 的 ParameterSweepAxis/Request/Cell/Result 對應
+// （Phase G 參數穩定度熱力圖）。
+
+export interface ParameterSweepAxis {
+  key: string;
+  values: string[];
+}
+
+export interface ParameterSweepRequest {
+  symbol: string;
+  interval: string;
+  year: number;
+  month: number;
+  strategyId: string;
+  baseParams: Record<string, string>;
+  paramX: ParameterSweepAxis;
+  paramY: ParameterSweepAxis;
+  startingCapital: string;
+  market: Market;
+  direction: Direction;
+  leverage: string;
+  marginMode: MarginMode | null;
+}
+
+export interface ParameterSweepCell {
+  paramXValue: string;
+  paramYValue: string;
+  annualizedReturn: string | null;
+  error: string | null;
+}
+
+export interface ParameterSweepResult {
+  paramXKey: string;
+  paramYKey: string;
+  cells: ParameterSweepCell[];
+}
+
+// 跟 Rust 的 MAX_SWEEP_COMBINATIONS 對應，前端用來在送出前就擋下太大的網格，
+// 不用等後端回錯誤才知道。
+export const MAX_SWEEP_COMBINATIONS = 64;

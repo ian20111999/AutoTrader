@@ -1,5 +1,9 @@
 import type { BacktestSummary } from "./backtestTypes";
 import { EquityCurveChart } from "./EquityCurveChart";
+import { CompareChart } from "./CompareChart";
+import { colorForIndex } from "./compareColors";
+import { YearlyReturnsTable } from "./YearlyReturnsTable";
+import { HealthCheckSummary } from "./HealthCheckSummary";
 import {
   formatDrawdown,
   formatPercentMagnitude,
@@ -10,12 +14,43 @@ import {
 
 interface BacktestResultProps {
   summary: BacktestSummary;
+  /** BTC 買入持有基準（跟這筆回測同一個 interval/year/month/startingCapital）。
+   * 還沒抓到（loading 中或抓失敗）就是 `null`——不畫 vs BTC 的疊圖，不假造資料。 */
+  baseline?: BacktestSummary | null;
 }
 
-export function BacktestResult({ summary }: BacktestResultProps) {
+export function BacktestResult({ summary, baseline = null }: BacktestResultProps) {
   return (
     <section aria-label={`回測結果：${summary.symbol}`} className="backtest-result">
       <EquityCurveChart curve={summary.curve} startingCapital={summary.startingCapital} />
+
+      {baseline && (
+        <div className="backtest-result__baseline">
+          <ul className="compare-legend">
+            <li className="compare-legend__item">
+              <span
+                className="compare-legend__swatch"
+                style={{ background: colorForIndex(0) }}
+                aria-hidden="true"
+              />
+              {summary.strategyName}
+            </li>
+            <li className="compare-legend__item">
+              <span
+                className="compare-legend__swatch"
+                style={{ background: colorForIndex(1) }}
+                aria-hidden="true"
+              />
+              {baseline.strategyName}
+            </li>
+          </ul>
+          <CompareChart runs={[summary, baseline]} />
+        </div>
+      )}
+
+      <YearlyReturnsTable summary={summary} baseline={baseline} />
+
+      <HealthCheckSummary summary={summary} />
 
       <dl className="backtest-metrics">
         <div className="backtest-metrics__item">

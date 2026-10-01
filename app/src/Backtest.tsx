@@ -11,6 +11,8 @@ import type {
 } from "./backtestTypes";
 import { INTERVAL_OPTIONS, LEVERAGE_WARNING_THRESHOLD } from "./backtestTypes";
 import { BacktestResult } from "./BacktestResult";
+import { SymbolContributionChart } from "./SymbolContributionChart";
+import { ParameterStabilityHeatmap } from "./ParameterStabilityHeatmap";
 
 interface BacktestProps {
   strategyConfig: StrategyConfig | null;
@@ -71,12 +73,38 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [results, setResults] = useState<BacktestSummary[] | null>(null);
   const [addedToCompare, setAddedToCompare] = useState(false);
+  const [baseline, setBaseline] = useState<BacktestSummary | null>(null);
 
   useEffect(() => {
     invoke<StrategyInfo[]>("list_builtin_strategies")
       .then(setStrategies)
       .catch(() => setStrategies([]));
   }, []);
+
+  // BTC 買入持有基準（vs BTC 疊圖、逐年表現表格用）：跟 3.7 Compare 頁同一個
+  // command，用這批結果共用的 interval/year/month/startingCapital 抓一次就夠
+  // （這批結果本來就是同一次表單送出、只有交易對不同）。抓不到（離線、下載
+  // 失敗）就維持 null，呼叫端不畫 vs BTC 的部分，不假造資料。
+  useEffect(() => {
+    if (!results || results.length === 0) return;
+    let cancelled = false;
+    const first = results[0];
+    invoke<BacktestSummary>("run_buy_hold_baseline_command", {
+      request: {
+        interval: first.interval,
+        year: first.year,
+        month: first.month,
+        startingCapital: first.startingCapital,
+      },
+    })
+      .then((summary) => {
+        if (!cancelled) setBaseline(summary);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [results]);
 
   const isFutures = market === "usdm_perp";
 
@@ -117,6 +145,7 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
     setStatus("loading");
     setErrorMessage(null);
     setResults(null);
+    setBaseline(null);
     setAddedToCompare(false);
     try {
       const runs = await Promise.all(
@@ -342,11 +371,19 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
         )}
         {status === "success" && results && (
           <>
+            {results.length > 1 && (
+              <section aria-label="各幣種對總報酬的貢獻" className="backtest-contribution-section">
+                <h2 className="backtest-form__label">各幣種對總報酬的貢獻</h2>
+                <SymbolContributionChart results={results} />
+              </section>
+            )}
+
             <div className="backtest-results">
               {results.map((summary) => (
-                <BacktestResult key={summary.symbol} summary={summary} />
+                <BacktestResult key={summary.symbol} summary={summary} baseline={baseline} />
               ))}
             </div>
+
             <div className="backtest-result-actions">
               <button
                 type="button"
@@ -357,6 +394,25 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
                 {addedToCompare ? "已加入比較 ✓" : "加入比較"}
               </button>
             </div>
+
+            {selectedStrategy && strategyConfig && strategyConfig.strategyId !== "custom" && (
+              <section aria-label="參數穩定度熱力圖" className="parameter-sweep-section">
+                <h2 className="backtest-form__label">參數穩定度</h2>
+                <ParameterStabilityHeatmap
+                  strategy={selectedStrategy}
+                  paramValues={strategyConfig.values}
+                  symbol={results[0].symbol}
+                  interval={interval}
+                  year={Number(month.split("-")[0])}
+                  month={Number(month.split("-")[1])}
+                  startingCapital={startingCapital.trim()}
+                  market={market}
+                  direction={direction}
+                  leverage={leverage.trim()}
+                  marginMode={isFutures ? marginMode : null}
+                />
+              </section>
+            )}
           </>
         )}
       </div>
