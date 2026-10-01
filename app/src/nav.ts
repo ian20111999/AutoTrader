@@ -1,5 +1,6 @@
-// 分頁識別碼；對應 ROADMAP 3.4-3.7、5.4、6.5。
+// 分頁識別碼；對應 ROADMAP 3.4-3.7、5.4、6.5，以及 Phase C 的總覽。
 export type PageId =
+  | "overview"
   | "strategies"
   | "backtest"
   | "compare"
@@ -14,6 +15,7 @@ export interface NavItem {
 
 // 給路由與頁首標題用：只有已經做出來、可以切換的分頁。
 export const NAV_ITEMS: NavItem[] = [
+  { id: "overview", label: "總覽" },
   { id: "strategies", label: "策略庫" },
   { id: "backtest", label: "回測" },
   { id: "compare", label: "比較" },
@@ -38,7 +40,7 @@ export interface SideNavGroup {
 }
 
 export const SIDE_NAV_GROUPS: SideNavGroup[] = [
-  { label: null, items: [{ id: "overview", label: "總覽", disabled: true }] },
+  { label: null, items: [{ id: "overview", label: "總覽" }] },
   {
     label: "研究",
     items: [

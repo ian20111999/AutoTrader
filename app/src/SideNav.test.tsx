@@ -20,8 +20,16 @@ describe("SideNav", () => {
     expect(onSelect).toHaveBeenCalledWith("backtest");
   });
 
+  it("「總覽」已接上頁面，點擊會觸發 onSelect", () => {
+    const onSelect = vi.fn();
+    render(<SideNav active="strategies" onSelect={onSelect} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "總覽" }));
+
+    expect(onSelect).toHaveBeenCalledWith("overview");
+  });
+
   it.each([
-    "總覽",
     "策略編輯器",
     "部署",
     "即時交易",

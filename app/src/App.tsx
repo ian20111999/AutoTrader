@@ -2,6 +2,7 @@ import { useState } from "react";
 import "./App.css";
 import { SideNav } from "./SideNav";
 import { TopBar } from "./TopBar";
+import { Overview } from "./Overview";
 import { Strategies } from "./Strategies";
 import { Backtest } from "./Backtest";
 import { Compare } from "./Compare";
@@ -11,6 +12,13 @@ import { Settings } from "./Settings";
 import { NAV_ITEMS, type PageId } from "./nav";
 import type { StrategyConfig } from "./strategyTypes";
 import type { BacktestSummary } from "./backtestTypes";
+
+// PaperTrading/TestnetTrading 頁面掛載時會從這兩個 key 讀「上次那場 session」
+// 繼續追蹤（見 PaperTrading.tsx/TestnetTrading.tsx 的 SESSION_ID_STORAGE_KEY）。
+// 總覽的「執行中策略」表格要「連到對應頁面並帶 sessionId」，沒有另外做一條
+// props 傳遞路徑——寫同一把 key 再切頁面，兩邊頁面不用互相知道對方存在。
+const PAPER_SESSION_STORAGE_KEY = "paperTrading.sessionId";
+const TESTNET_SESSION_STORAGE_KEY = "testnetTrading.sessionId";
 
 const PAGE_TITLES: Record<PageId, string> = Object.fromEntries(
   NAV_ITEMS.map((item) => [item.id, item.label]),
@@ -30,6 +38,22 @@ function App() {
       <div className="app-shell__main">
         <TopBar title={PAGE_TITLES[page]} />
         <main className="app-content">
+          {page === "overview" && (
+            <Overview
+              onOpenPaperTrading={(sessionId) => {
+                localStorage.setItem(PAPER_SESSION_STORAGE_KEY, sessionId);
+                setPage("paperTrading");
+              }}
+              onOpenTestnetTrading={(sessionId) => {
+                localStorage.setItem(TESTNET_SESSION_STORAGE_KEY, sessionId);
+                setPage("testnetTrading");
+              }}
+              onOpenBacktestCompare={(summary) => {
+                setSavedBacktests((prev) => [...prev, summary]);
+                setPage("compare");
+              }}
+            />
+          )}
           {page === "strategies" && (
             <Strategies strategyConfig={strategyConfig} onApplyConfig={setStrategyConfig} />
           )}

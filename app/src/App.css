@@ -1056,3 +1056,121 @@ a:hover {
   font-size: 12px;
   color: var(--text-secondary);
 }
+
+/* 總覽頁（Phase C） */
+
+.overview {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.overview-stats {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.overview-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  min-width: 180px;
+  flex: 1 1 180px;
+}
+
+.overview-card--wide {
+  flex: 2 1 360px;
+}
+
+.overview-card__title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.overview-card__big {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 600;
+  font-family: "JetBrains Mono", monospace;
+}
+
+.overview-card__sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.overview-card__note {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.overview-equity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.overview-equity-list__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  font-family: "JetBrains Mono", monospace;
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 4px;
+}
+
+.overview-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: "IBM Plex Sans", sans-serif;
+}
+
+.overview-badge--stale {
+  background: rgba(244, 85, 94, 0.15);
+  color: var(--danger);
+}
+
+.overview-badge--danger {
+  background: var(--danger);
+  color: #fff;
+}
+
+.overview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.overview-section__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.overview-table__row {
+  cursor: pointer;
+}
+
+.overview-table__row:hover {
+  background: var(--nav-active);
+}
+
+.overview-equity-chart__dot {
+  fill: var(--accent);
+}

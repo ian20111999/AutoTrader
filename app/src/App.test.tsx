@@ -18,13 +18,21 @@ describe("App", () => {
     vi.mocked(invoke).mockResolvedValue([]);
   });
 
-  it("顯示側邊導覽的五個分頁項目", () => {
+  it("顯示側邊導覽的分頁項目", () => {
     render(<App />);
     const nav = screen.getByRole("navigation", { name: "主選單" });
     expect(nav).toBeInTheDocument();
-    for (const label of ["策略庫", "回測", "比較", "模擬交易", "設定"]) {
+    for (const label of ["總覽", "策略庫", "回測", "比較", "模擬交易", "設定"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
+  });
+
+  it("點擊「總覽」切換到總覽分頁", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "總覽" }));
+
+    expect(screen.getByRole("heading", { name: "總覽" })).toBeInTheDocument();
   });
 
   it("預設顯示策略庫分頁，TopBar標題為「策略庫」", () => {
