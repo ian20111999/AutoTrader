@@ -34,6 +34,9 @@ export interface BacktestRequest {
   direction: Direction;
   leverage: string;
   marginMode: MarginMode | null;
+  // strategyId === "custom" 時，整份 DSL 策略（strategyDslTypes.ts 的
+  // StrategyAst）序列化後的 JSON 字串；其他策略不用填。
+  dslJson?: string | null;
 }
 
 export interface BacktestSummary {

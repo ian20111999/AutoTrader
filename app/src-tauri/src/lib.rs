@@ -8,7 +8,7 @@ mod testnet_trading;
 mod warmup;
 
 use account_permissions::check_account_permissions;
-use backtest::{run_backtest_command, run_buy_hold_baseline_command};
+use backtest::{run_backtest_command, run_buy_hold_baseline_command, validate_strategy_ast};
 use paper_trading::{
     paper_trading_status, start_paper_trading, stop_paper_trading, PaperTradingState,
 };
@@ -52,6 +52,7 @@ pub fn run() {
             list_builtin_strategies,
             run_backtest_command,
             run_buy_hold_baseline_command,
+            validate_strategy_ast,
             save_binance_credentials,
             binance_credentials_status,
             clear_binance_credentials,

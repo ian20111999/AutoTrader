@@ -16,7 +16,7 @@
 
 use at_core::{
     read_bars_file, run_backtest, BacktestConfig, Bar, DirectionMode, FeeModel, Fixed, Interval,
-    LeveragedStrategy, Market, Metrics, Strategy, Symbol, TargetPosition,
+    LeveragedStrategy, Market, Metrics, Strategy, StrategyAst, Symbol, TargetPosition,
 };
 use at_downloader::{download_and_store_monthly_klines, local_path};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,16 @@ pub struct BacktestRequest {
     pub leverage: String,
     /// 保證金模式：`"isolated"`（逐倉）或 `"cross"`（全倉）。現貨市場不適用，傳 `None`。
     pub margin_mode: Option<String>,
+    /// `strategy_id == "custom"` 時，這裡放整份 DSL 策略的 JSON 字串
+    /// （`at_core::StrategyAst`）。其他策略一律傳 `None`。
+    ///
+    /// 不塞進既有的 `params: HashMap<String, String>`：那個欄位是「扁平的
+    /// key→字串」參數表，`BacktestSummary.params` 會原樣回顯給比較頁
+    /// （3.7）當作一列一列的參數顯示；DSL 是一整棵巢狀 JSON 樹，硬塞進去會讓
+    /// 比較頁顯示一包看不懂的 JSON blob，語意也對不上「這是參數」。開一個
+    /// 專用欄位，兩種策略各自的資料形狀互不干擾。
+    #[serde(default)]
+    pub dsl_json: Option<String>,
 }
 
 /// 保證金模式。目前這一版的回測引擎整場只會同時持有一個交易對的一個倉位，
@@ -161,6 +171,22 @@ pub(crate) fn build_strategy(
     }
 }
 
+/// 代號保留給自訂策略（DSL）；不放進 `strategies::builtin_strategies()`
+/// 查表清單，所以使用者在策略庫裡選不到它——這次只接通回測頁面能不能跑，
+/// 不處理使用者怎麼在 UI 上建立/編輯一個自訂策略的完整流程。
+pub(crate) const CUSTOM_STRATEGY_ID: &str = "custom";
+const CUSTOM_STRATEGY_NAME: &str = "自訂策略（DSL）";
+
+/// 把一段 DSL JSON 字串解析、編譯成可以執行的策略。
+///
+/// `compile()` 已經是信任邊界（節點數/深度/週期/位移/槓桿都在那裡驗證過），
+/// 這裡不另外做、也不繞過任何檢查，只負責把 `DslError` 轉成繁中錯誤字串。
+fn build_custom_strategy(dsl_json: &str) -> Result<at_core::CustomStrategy, String> {
+    let ast: StrategyAst =
+        serde_json::from_str(dsl_json).map_err(|e| format!("DSL JSON 格式錯誤：{e}"))?;
+    ast.compile().map_err(|e| format!("自訂策略編譯失敗：{e}"))
+}
+
 /// 用策略 id 找內建清單裡的顯示名稱，跟 3.2 的 `strategies::builtin_strategies`
 /// 共用同一份名稱，不在這裡另外寫一份中文字串。
 fn strategy_display_name(strategy_id: &str) -> Result<String, String> {
@@ -169,6 +195,36 @@ fn strategy_display_name(strategy_id: &str) -> Result<String, String> {
         .find(|info| info.id == strategy_id)
         .map(|info| info.name)
         .ok_or_else(|| format!("不支援的策略代號：{strategy_id}"))
+}
+
+/// [`validate_strategy_ast_command`] 的回傳：合不合法 + 錯誤訊息。
+///
+/// 不用 `Result<(), String>`：這是給積木 UI 做即時驗證用的，使用者打字打到
+/// 一半本來就會送出不合法的 JSON，那是正常輸入而不是「command 失敗」，所以
+/// 用一個一定會 `Ok` 的 DTO，讓前端不用另外處理 `Err` 分支。
+#[derive(Serialize, Clone, PartialEq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DslValidationResult {
+    pub valid: bool,
+    /// `valid` 是 `false` 時才有值；繁體中文、帶路徑（`DslError` 的格式）。
+    pub error: Option<String>,
+}
+
+/// 給積木 UI（之後的任務）做即時驗證用：只解析＋`compile()`，不建策略、
+/// 不跑回測。驗證規則跟真正建立自訂策略時完全同一條路徑
+/// （[`build_custom_strategy`]），不會有「這裡說合法，建立時卻失敗」的落差。
+#[tauri::command]
+pub fn validate_strategy_ast(dsl_json: String) -> DslValidationResult {
+    match build_custom_strategy(&dsl_json) {
+        Ok(_) => DslValidationResult {
+            valid: true,
+            error: None,
+        },
+        Err(message) => DslValidationResult {
+            valid: false,
+            error: Some(message),
+        },
+    }
 }
 
 /// 權益曲線上的一點，`equity` 用字串保留 `Fixed` 的精確表示。
@@ -329,8 +385,19 @@ fn summarize(
         }
     }
 
-    let strategy = build_strategy(&request.strategy_id, &request.params)?;
-    let strategy_name = strategy_display_name(&request.strategy_id)?;
+    let (strategy, strategy_name): (Box<dyn Strategy + Send>, String) =
+        if request.strategy_id == CUSTOM_STRATEGY_ID {
+            let dsl_json = request
+                .dsl_json
+                .as_deref()
+                .ok_or_else(|| "自訂策略缺少 DSL JSON（dslJson）".to_string())?;
+            let strategy = build_custom_strategy(dsl_json)?;
+            (Box::new(strategy), CUSTOM_STRATEGY_NAME.to_string())
+        } else {
+            let strategy = build_strategy(&request.strategy_id, &request.params)?;
+            let name = strategy_display_name(&request.strategy_id)?;
+            (strategy, name)
+        };
     let mut strategy = LeveragedStrategy::new(strategy, leverage, direction);
 
     let fee_model = match market {
@@ -547,6 +614,7 @@ mod tests {
             direction: "long_only".to_string(),
             leverage: "1".to_string(),
             margin_mode: None,
+            dsl_json: None,
         }
     }
 
@@ -825,6 +893,7 @@ mod tests {
             direction: "long_only".to_string(),
             leverage: "1".to_string(),
             margin_mode: None,
+            dsl_json: None,
         };
         let summary = summarize(&bars, &req, &path).unwrap();
 
@@ -912,5 +981,150 @@ mod tests {
         assert_eq!(summary.trades, direct.trades);
         // 從頭到尾都持有、K 線一路上漲，應該只開一次倉，不會中途再交易。
         assert_eq!(summary.trades, 1);
+    }
+
+    /// 均線交叉（sma10/sma50）的 DSL 版本，跟 `strategy_dsl` 模組文件註解裡的
+    /// 範例同一份，拿來驗證橋接層接線接對了。
+    fn sma_cross_dsl_json() -> String {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "direction": "long_only",
+            "sizing": { "positionPct": "100", "leverage": "1" },
+            "longEntry": {
+                "kind": "gt",
+                "left":  { "kind": "indicator", "name": "sma", "params": { "period": 10 } },
+                "right": { "kind": "indicator", "name": "sma", "params": { "period": 50 } }
+            },
+            "longExit": {
+                "kind": "lte",
+                "left":  { "kind": "indicator", "name": "sma", "params": { "period": 10 } },
+                "right": { "kind": "indicator", "name": "sma", "params": { "period": 50 } }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn custom_strategy_runs_a_backtest_through_the_dsl_engine() {
+        let bars = trending_bars();
+        let mut req = request("custom", &[], "10000");
+        req.dsl_json = Some(sma_cross_dsl_json());
+
+        let summary = summarize(&bars, &req, Path::new("/tmp/fake.csv")).unwrap();
+
+        assert_eq!(summary.strategy_id, "custom");
+        assert_eq!(summary.strategy_name, "自訂策略（DSL）");
+        assert_eq!(summary.bar_count, bars.len());
+        assert_eq!(summary.curve.len(), bars.len());
+    }
+
+    #[test]
+    fn custom_strategy_without_dsl_json_is_a_clear_chinese_error() {
+        let bars = trending_bars();
+        let req = request("custom", &[], "10000");
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .err()
+            .unwrap();
+        assert!(err.contains("缺少 DSL JSON"), "{err}");
+    }
+
+    #[test]
+    fn custom_strategy_with_malformed_json_is_a_clear_chinese_error() {
+        let bars = trending_bars();
+        let mut req = request("custom", &[], "10000");
+        req.dsl_json = Some("{ not json".to_string());
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .err()
+            .unwrap();
+        assert!(err.contains("DSL JSON 格式錯誤"), "{err}");
+    }
+
+    #[test]
+    fn custom_strategy_over_the_trust_boundary_reports_the_limit_in_chinese() {
+        // period 超過 MAX_PERIOD（2000）：撞到 compile() 的信任邊界，錯誤訊息
+        // 要點名是哪個限制被超過，不是只說「編譯失敗」。
+        let bars = trending_bars();
+        let mut req = request("custom", &[], "10000");
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "direction": "long_only",
+            "sizing": { "positionPct": "100", "leverage": "1" },
+            "longEntry": {
+                "kind": "gt",
+                "left":  { "kind": "indicator", "name": "sma", "params": { "period": 999_999 } },
+                "right": { "kind": "number", "value": "0" }
+            },
+            "longExit": {
+                "kind": "lt",
+                "left":  { "kind": "indicator", "name": "sma", "params": { "period": 10 } },
+                "right": { "kind": "number", "value": "0" }
+            }
+        })
+        .to_string();
+        req.dsl_json = Some(json);
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .err()
+            .unwrap();
+        assert!(err.contains("自訂策略編譯失敗"), "{err}");
+        assert!(err.contains("2000"), "應該點名週期上限是 2000：{err}");
+    }
+
+    #[test]
+    fn deserializes_dsl_json_field_from_camel_case() {
+        let json = serde_json::json!({
+            "symbol": "BTCUSDT",
+            "interval": "1d",
+            "year": 2024,
+            "month": 1,
+            "strategyId": "custom",
+            "params": {},
+            "startingCapital": "10000",
+            "market": "spot",
+            "direction": "long_only",
+            "leverage": "1",
+            "marginMode": null,
+            "dslJson": "{}",
+        });
+        let req: BacktestRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.dsl_json.as_deref(), Some("{}"));
+    }
+
+    #[test]
+    fn validate_strategy_ast_accepts_a_valid_dsl() {
+        let result = validate_strategy_ast(sma_cross_dsl_json());
+        assert!(result.valid);
+        assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn validate_strategy_ast_rejects_malformed_json_with_a_chinese_message() {
+        let result = validate_strategy_ast("{ not json".to_string());
+        assert!(!result.valid);
+        assert!(result.error.unwrap().contains("DSL JSON 格式錯誤"));
+    }
+
+    #[test]
+    fn validate_strategy_ast_rejects_a_schema_that_breaks_the_trust_boundary() {
+        let json = serde_json::json!({
+            "schemaVersion": 1,
+            "direction": "long_only",
+            "sizing": { "positionPct": "100", "leverage": "1" },
+            "longEntry": {
+                "kind": "gt",
+                "left":  { "kind": "indicator", "name": "sma", "params": { "period": 999_999 } },
+                "right": { "kind": "number", "value": "0" }
+            },
+            "longExit": {
+                "kind": "lt",
+                "left":  { "kind": "indicator", "name": "sma", "params": { "period": 10 } },
+                "right": { "kind": "number", "value": "0" }
+            }
+        })
+        .to_string();
+        let result = validate_strategy_ast(json);
+        assert!(!result.valid);
+        let error = result.error.unwrap();
+        assert!(error.contains("自訂策略編譯失敗"), "{error}");
+        assert!(error.contains("2000"), "{error}");
     }
 }

@@ -255,6 +255,9 @@ dependencies = [
 [[package]]
 name = "at-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "at-downloader"
