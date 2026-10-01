@@ -14,7 +14,7 @@ interface BacktestResultProps {
 
 export function BacktestResult({ summary }: BacktestResultProps) {
   return (
-    <section aria-label="回測結果" className="backtest-result">
+    <section aria-label={`回測結果：${summary.symbol}`} className="backtest-result">
       <EquityCurveChart curve={summary.curve} startingCapital={summary.startingCapital} />
 
       <dl className="backtest-metrics">

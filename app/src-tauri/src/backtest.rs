@@ -5,13 +5,18 @@
 //! 沒有就用 [`at_downloader`] 下載現貨月線（1.7 已驗證過的公開資料下載，
 //! 跟「第 6/7 步之前不可下單」的安全規則無關）。
 //!
-//! ponytail: 手續費/滑價目前寫死成 [`DEFAULT_SLIPPAGE`]／`FeeModel::spot_vip0()`
-//! （現貨 VIP0 + 0.05% 滑價），3.6 還沒有對應的 UI 控制項。回傳的
-//! [`BacktestSummary`] 把用了什麼假設完整回顯，之後要開放使用者調整就在這裡加欄位。
+//! ponytail: 滑價目前仍寫死成 [`DEFAULT_SLIPPAGE`]（0.05%），還沒有對應的 UI
+//! 控制項；手續費依市場自動選 `FeeModel::spot_vip0()`／`FeeModel::futures_vip0()`。
+//! 資金費率全程固定 0（還沒有歷史資金費率這個資料來源，`useRealFunding` 開關
+//! 在前端是 disabled + 「即將推出」）。回傳的 [`BacktestSummary`] 把用了什麼
+//! 假設完整回顯，之後要開放使用者調整就在這裡加欄位。
+//!
+//! 槓桿／方向怎麼接進只會回傳「多/空手」的四個內建策略：見
+//! [`at_core::LeveragedStrategy`] 的文件註解。
 
 use at_core::{
-    read_bars_file, run_backtest, BacktestConfig, Bar, FeeModel, Fixed, Interval, Metrics,
-    Strategy, Symbol,
+    read_bars_file, run_backtest, BacktestConfig, Bar, DirectionMode, FeeModel, Fixed, Interval,
+    LeveragedStrategy, Market, Metrics, Strategy, Symbol,
 };
 use at_downloader::{download_and_store_monthly_klines, local_path};
 use serde::{Deserialize, Serialize};
@@ -28,6 +33,10 @@ pub(crate) const DEFAULT_SLIPPAGE: Fixed = Fixed::from_raw(50_000); // 0.0005
 
 /// `run_backtest_command` 的輸入：symbol/interval/區間/策略/參數/起始資金
 /// 一次送進來。跟 `strategyTypes.ts` 的 `StrategyConfig` 對應（`strategyId` + `params`）。
+///
+/// 前端的多幣種選擇不在這個結構裡：UI 對每個選到的交易對各呼叫一次這個
+/// command，一次只測一個交易對，跟原本單一交易對的行為一致，不需要後端
+/// 另外做批次結構。
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct BacktestRequest {
@@ -38,6 +47,59 @@ pub struct BacktestRequest {
     pub strategy_id: String,
     pub params: HashMap<String, String>,
     pub starting_capital: String,
+    /// 市場：`"spot"`（現貨）或 `"usdm_perp"`（U 本位合約）。
+    pub market: String,
+    /// 方向：`"long_only"`（只做多）或 `"long_short"`（多空）。
+    pub direction: String,
+    /// 槓桿倍數，字串保留 `Fixed` 精確度。現貨市場必須是 `"1"`。
+    pub leverage: String,
+    /// 保證金模式：`"isolated"`（逐倉）或 `"cross"`（全倉）。現貨市場不適用，傳 `None`。
+    pub margin_mode: Option<String>,
+}
+
+/// 保證金模式。目前這一版的回測引擎整場只會同時持有一個交易對的一個倉位，
+/// 帳本就是「一份現金＋一份倉位」，逐倉與全倉在算出來的數字上沒有差異
+/// （差異要等到一個帳戶同時跑多個倉位、彼此共用或不共用保證金時才會出現）。
+/// 這裡還是把選項收下、原樣回顯，是為了接上之後的模擬交易/實盤帳戶風控，
+/// 不是沒作用的假選項。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MarginMode {
+    Isolated,
+    Cross,
+}
+
+impl MarginMode {
+    fn label_zh(self) -> &'static str {
+        match self {
+            MarginMode::Isolated => "逐倉",
+            MarginMode::Cross => "全倉",
+        }
+    }
+}
+
+fn parse_market(raw: &str) -> Result<Market, String> {
+    match raw {
+        "spot" => Ok(Market::Spot),
+        "usdm_perp" => Ok(Market::UsdmPerp),
+        other => Err(format!("不支援的市場：{other}")),
+    }
+}
+
+fn parse_direction(raw: &str) -> Result<DirectionMode, String> {
+    match raw {
+        "long_only" => Ok(DirectionMode::LongOnly),
+        "long_short" => Ok(DirectionMode::LongShort),
+        other => Err(format!("不支援的方向：{other}")),
+    }
+}
+
+fn parse_margin_mode(raw: &str) -> Result<MarginMode, String> {
+    match raw {
+        "isolated" => Ok(MarginMode::Isolated),
+        "cross" => Ok(MarginMode::Cross),
+        other => Err(format!("不支援的保證金模式：{other}")),
+    }
 }
 
 fn parse_usize(params: &HashMap<String, String>, key: &str) -> Result<usize, String> {
@@ -142,6 +204,10 @@ pub struct BacktestSummary {
     /// 這次回測實際用的成本假設，給前端顯示「這是簡化過的設定」。
     pub fee_model: String,
     pub slippage: String,
+    pub market: String,
+    pub direction: String,
+    pub leverage: String,
+    pub margin_mode: Option<String>,
     /// 資料來源的本機檔案路徑，方便除錯「橋接有沒有把資料讀對」。
     pub data_source_path: String,
 }
@@ -159,17 +225,57 @@ fn summarize(
         .parse::<Fixed>()
         .map_err(|e| format!("起始資金不是合法數字（{}）：{e}", request.starting_capital))?;
 
-    let mut strategy = build_strategy(&request.strategy_id, &request.params)?;
-    let strategy_name = strategy_display_name(&request.strategy_id)?;
+    let market = parse_market(&request.market)?;
+    let direction = parse_direction(&request.direction)?;
+    let leverage = request
+        .leverage
+        .trim()
+        .parse::<Fixed>()
+        .map_err(|e| format!("槓桿倍數不是合法數字（{}）：{e}", request.leverage))?;
+    if leverage <= Fixed::ZERO {
+        return Err("槓桿倍數必須大於 0".to_string());
+    }
+    let margin_mode = match (market, &request.margin_mode) {
+        (Market::UsdmPerp, Some(raw)) => Some(parse_margin_mode(raw)?),
+        (Market::UsdmPerp, None) => return Err("合約市場必須選擇保證金模式".to_string()),
+        (Market::Spot, _) => None,
+    };
+    if market == Market::Spot {
+        if direction == DirectionMode::LongShort {
+            return Err("現貨市場不支援做空，請把方向切換成「只做多」".to_string());
+        }
+        if leverage != Fixed::ONE {
+            return Err("現貨市場不支援槓桿，請把槓桿設為 1 倍".to_string());
+        }
+    }
 
+    let strategy = build_strategy(&request.strategy_id, &request.params)?;
+    let strategy_name = strategy_display_name(&request.strategy_id)?;
+    let mut strategy = LeveragedStrategy::new(strategy, leverage, direction);
+
+    let fee_model = match market {
+        Market::Spot => FeeModel::spot_vip0(),
+        Market::UsdmPerp => FeeModel::futures_vip0(),
+    };
+    let fee_model_label = match market {
+        Market::Spot => "spot_vip0（現貨 VIP0，吃單 0.1%）",
+        Market::UsdmPerp => "futures_vip0（合約 VIP0，吃單 0.05%）",
+    };
     let config = BacktestConfig {
-        fees: Some(FeeModel::spot_vip0()),
+        initial_capital: capital,
+        fees: Some(fee_model),
         slippage: DEFAULT_SLIPPAGE,
-        ..BacktestConfig::frictionless(capital)
+        // ponytail: 資金費全程固定 0（還沒有歷史資金費率這個資料來源）。
+        // 「計入真實歷史資金費率」開關在前端是 disabled + 即將推出，這裡先不接。
+        funding_rate: Fixed::ZERO,
+        maintenance_margin_rate: match market {
+            Market::Spot => None,
+            Market::UsdmPerp => Some(at_core::DEFAULT_MAINTENANCE_MARGIN_RATE),
+        },
     };
 
     let result =
-        run_backtest(bars, strategy.as_mut(), &config).map_err(|e| format!("回測執行失敗：{e}"))?;
+        run_backtest(bars, &mut strategy, &config).map_err(|e| format!("回測執行失敗：{e}"))?;
     let metrics = Metrics::from_curve(&result.curve);
 
     Ok(BacktestSummary {
@@ -197,8 +303,12 @@ fn summarize(
         max_drawdown: metrics.max_drawdown.to_string(),
         sharpe: metrics.sharpe.map(|v| v.to_string()),
         span_years: metrics.span_years.map(|v| v.to_string()),
-        fee_model: "spot_vip0（現貨 VIP0，吃單 0.1%）".to_string(),
+        fee_model: fee_model_label.to_string(),
         slippage: DEFAULT_SLIPPAGE.to_string(),
+        market: request.market.clone(),
+        direction: request.direction.clone(),
+        leverage: leverage.to_string(),
+        margin_mode: margin_mode.map(|m| m.label_zh().to_string()),
         data_source_path: data_source_path.display().to_string(),
     })
 }
@@ -292,6 +402,7 @@ mod tests {
             .collect()
     }
 
+    /// 預設現貨／只做多／1 倍槓桿，大多數測試不關心槓桿與方向時用這個。
     fn request(
         strategy_id: &str,
         params: &[(&str, &str)],
@@ -305,6 +416,10 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             params: param_map(params),
             starting_capital: starting_capital.to_string(),
+            market: "spot".to_string(),
+            direction: "long_only".to_string(),
+            leverage: "1".to_string(),
+            margin_mode: None,
         }
     }
 
@@ -377,13 +492,18 @@ mod tests {
 
         let summary = summarize(&bars, &req, Path::new("/tmp/fake.csv")).unwrap();
 
-        // 直接照 summarize 內部用的同一組設定，重新跑一次 run_backtest 對照。
+        // 直接照 summarize 內部用的同一組設定（現貨、只做多、1 倍槓桿），
+        // 重新跑一次 run_backtest 對照。
         let config = BacktestConfig {
+            initial_capital: fx("10000"),
             fees: Some(FeeModel::spot_vip0()),
             slippage: DEFAULT_SLIPPAGE,
-            ..BacktestConfig::frictionless(fx("10000"))
+            funding_rate: Fixed::ZERO,
+            maintenance_margin_rate: None,
         };
-        let mut strategy = at_core::SmaCross::new(3, 8).unwrap();
+        let strategy = at_core::SmaCross::new(3, 8).unwrap();
+        let mut strategy =
+            LeveragedStrategy::new(Box::new(strategy), fx("1"), DirectionMode::LongOnly);
         let direct = run_backtest(&bars, &mut strategy, &config).unwrap();
         let direct_metrics = Metrics::from_curve(&direct.curve);
 
@@ -405,6 +525,101 @@ mod tests {
         assert_eq!(summary.strategy_name, "均線交叉");
         assert_eq!(summary.bar_count, bars.len());
         assert_eq!(summary.fee_model, "spot_vip0（現貨 VIP0，吃單 0.1%）");
+    }
+
+    #[test]
+    fn spot_market_rejects_leverage_other_than_one() {
+        let bars = trending_bars();
+        let mut req = request(
+            "sma_cross",
+            &[("fastPeriod", "3"), ("slowPeriod", "8")],
+            "10000",
+        );
+        req.leverage = "2".to_string();
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .err()
+            .unwrap();
+        assert!(err.contains("現貨市場不支援槓桿"), "{err}");
+    }
+
+    #[test]
+    fn spot_market_rejects_long_short_direction() {
+        let bars = trending_bars();
+        let mut req = request(
+            "sma_cross",
+            &[("fastPeriod", "3"), ("slowPeriod", "8")],
+            "10000",
+        );
+        req.direction = "long_short".to_string();
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .err()
+            .unwrap();
+        assert!(err.contains("現貨市場不支援做空"), "{err}");
+    }
+
+    #[test]
+    fn futures_market_requires_margin_mode() {
+        let bars = trending_bars();
+        let mut req = request(
+            "sma_cross",
+            &[("fastPeriod", "3"), ("slowPeriod", "8")],
+            "10000",
+        );
+        req.market = "usdm_perp".to_string();
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .err()
+            .unwrap();
+        assert!(err.contains("必須選擇保證金模式"), "{err}");
+    }
+
+    #[test]
+    fn leverage_scales_the_backtest_relative_to_one_x() {
+        let bars = trending_bars();
+        let mut one_x = request(
+            "sma_cross",
+            &[("fastPeriod", "3"), ("slowPeriod", "8")],
+            "10000",
+        );
+        one_x.market = "usdm_perp".to_string();
+        one_x.margin_mode = Some("isolated".to_string());
+
+        let mut two_x = one_x.clone();
+        two_x.leverage = "2".to_string();
+
+        let summary_1x = summarize(&bars, &one_x, Path::new("/tmp/fake.csv")).unwrap();
+        let summary_2x = summarize(&bars, &two_x, Path::new("/tmp/fake.csv")).unwrap();
+
+        // 2 倍槓桿在同一段上漲行情應該比 1 倍賺得更多（名目部位更大）。
+        let final_1x: Fixed = summary_1x.curve.last().unwrap().equity.parse().unwrap();
+        let final_2x: Fixed = summary_2x.curve.last().unwrap().equity.parse().unwrap();
+        assert!(
+            final_2x > final_1x,
+            "2 倍槓桿應該比 1 倍賺更多：1x={final_1x} 2x={final_2x}"
+        );
+        assert_eq!(summary_2x.leverage, "2");
+        assert_eq!(summary_2x.margin_mode.as_deref(), Some("逐倉"));
+    }
+
+    #[test]
+    fn long_short_direction_mirrors_flat_bars_into_a_short() {
+        // Donchian 在暖機期間 / 無突破時回傳空手；多空模式下這段應該變成做空，
+        // 讓最終部位跟只做多模式不一樣。
+        let bars = trending_bars();
+        let mut long_only = request(
+            "donchian",
+            &[("entryPeriod", "20"), ("exitPeriod", "10")],
+            "10000",
+        );
+        long_only.market = "usdm_perp".to_string();
+        long_only.margin_mode = Some("cross".to_string());
+
+        let mut long_short = long_only.clone();
+        long_short.direction = "long_short".to_string();
+
+        let a = summarize(&bars, &long_only, Path::new("/tmp/fake.csv")).unwrap();
+        let b = summarize(&bars, &long_short, Path::new("/tmp/fake.csv")).unwrap();
+
+        assert_ne!(a.curve, b.curve, "多空模式應該跟只做多模式算出不同的曲線");
     }
 
     #[test]
@@ -443,6 +658,10 @@ mod tests {
             "strategyId": "sma_cross",
             "params": {"fastPeriod": "10", "slowPeriod": "50"},
             "startingCapital": "10000",
+            "market": "spot",
+            "direction": "long_only",
+            "leverage": "1",
+            "marginMode": null,
         });
         let req: BacktestRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.strategy_id, "sma_cross");
@@ -475,13 +694,19 @@ mod tests {
             strategy_id: "sma_cross".to_string(),
             params: param_map(&[("fastPeriod", "3"), ("slowPeriod", "8")]),
             starting_capital: "10000".to_string(),
+            market: "spot".to_string(),
+            direction: "long_only".to_string(),
+            leverage: "1".to_string(),
+            margin_mode: None,
         };
         let summary = summarize(&bars, &req, &path).unwrap();
 
         let config = BacktestConfig {
+            initial_capital: fx("10000"),
             fees: Some(FeeModel::spot_vip0()),
             slippage: DEFAULT_SLIPPAGE,
-            ..BacktestConfig::frictionless(fx("10000"))
+            funding_rate: Fixed::ZERO,
+            maintenance_margin_rate: None,
         };
         let mut strategy = at_core::SmaCross::new(3, 8).unwrap();
         let direct = run_backtest(&bars, &mut strategy, &config).unwrap();
