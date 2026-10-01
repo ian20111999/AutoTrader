@@ -1,0 +1,13 @@
+[package]
+name = "at-testnet-trading"
+description = "把策略執行接上 Binance 測試網：送單 → 等回報 → 更新帳本（唯一的送單路徑先過 at-risk-control 閘門）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-binance = { path = "../binance-client" }
+at-core = { path = "../core" }
+at-market-stream = { path = "../market-stream" }
+at-risk-control = { path = "../risk-control" }
