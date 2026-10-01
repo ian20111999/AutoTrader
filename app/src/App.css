@@ -84,6 +84,21 @@ a:hover {
   color: var(--text-primary);
 }
 
+.side-nav__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.side-nav__group-label {
+  padding: 6px 12px 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
 .side-nav__items {
   display: flex;
   flex-direction: column;
@@ -115,6 +130,22 @@ a:hover {
 .side-nav__item--active:hover {
   background: var(--nav-active);
   color: var(--accent);
+}
+
+.side-nav__item:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.side-nav__item:disabled:hover {
+  background: transparent;
+}
+
+.side-nav__badge {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* TopBar */
