@@ -375,19 +375,20 @@ mod tests {
         "orderListId": -1,
         "clientOrderId": "myOrder1",
         "price": "0.1",
-        "origQty": "2",
-        "executedQty": "0",
-        "cummulativeQuoteQty": "0",
+        "origQty": "1.0",
+        "executedQty": "0.0",
+        "cummulativeQuoteQty": "0.0",
         "status": "NEW",
         "timeInForce": "GTC",
         "type": "LIMIT",
         "side": "BUY",
         "stopPrice": "0.0",
         "icebergQty": "0.0",
-        "time": 1565245656089,
-        "updateTime": 1565245656089,
+        "time": 1499827319559,
+        "updateTime": 1499827319559,
         "isWorking": true,
-        "workingTime": 1565245656089,
+        "workingTime": 1499827319559,
+        "origQuoteOrderQty": "0.000000",
         "selfTradePreventionMode": "NONE"
     }"#;
 
@@ -436,8 +437,8 @@ mod tests {
         assert_eq!(order.symbol, "LTCBTC");
         assert_eq!(order.order_id, 1);
         assert_eq!(order.status, OrderStatus::New);
-        assert_eq!(order.orig_qty, "2".parse::<Fixed>().unwrap());
-        assert_eq!(order.executed_qty, "0".parse::<Fixed>().unwrap());
+        assert_eq!(order.orig_qty, "1.0".parse::<Fixed>().unwrap());
+        assert_eq!(order.executed_qty, "0.0".parse::<Fixed>().unwrap());
     }
 
     #[test]
@@ -456,7 +457,8 @@ mod tests {
 
     #[test]
     fn non_numeric_quantity_field_is_a_response_error() {
-        let bad = OFFICIAL_QUERY_ORDER.replace(r#""origQty": "2""#, r#""origQty": "not-a-number""#);
+        let bad =
+            OFFICIAL_QUERY_ORDER.replace(r#""origQty": "1.0""#, r#""origQty": "not-a-number""#);
         let err = OrderResponse::parse(&bad).unwrap_err();
         assert!(err.to_string().contains("origQty"));
     }
