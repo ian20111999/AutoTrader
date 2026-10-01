@@ -634,6 +634,40 @@ a:hover {
   border-radius: 10px;
 }
 
+.compare-chart-view {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.compare-chart-view__toggle {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 4px;
+  padding: 3px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.compare-chart-view__toggle-button {
+  min-height: 26px;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.compare-chart-view__toggle-button[aria-pressed="true"] {
+  background: var(--bg-panel);
+  color: var(--text-primary);
+}
+
 .compare-chart {
   display: block;
   width: 100%;
@@ -650,6 +684,26 @@ a:hover {
   fill: none;
   stroke-width: 1.8;
   vector-effect: non-scaling-stroke;
+}
+
+.compare-insight {
+  box-sizing: border-box;
+  padding: 10px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.compare-insight__muted {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.compare-table__baseline-row {
+  color: var(--text-secondary);
 }
 
 .compare-table {

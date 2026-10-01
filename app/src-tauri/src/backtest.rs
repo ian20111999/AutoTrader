@@ -11,7 +11,7 @@
 
 use at_core::{
     read_bars_file, run_backtest, BacktestConfig, Bar, FeeModel, Fixed, Interval, Metrics,
-    Strategy, Symbol,
+    Strategy, Symbol, TargetPosition,
 };
 use at_downloader::{download_and_store_monthly_klines, local_path};
 use serde::{Deserialize, Serialize};
@@ -146,21 +146,32 @@ pub struct BacktestSummary {
     pub data_source_path: String,
 }
 
-/// 純邏輯：拿到 K 線之後的「建立策略→跑回測→算績效→組 DTO」，
+/// 純邏輯：拿到 K 線跟「已經建好的策略」之後，跑回測→算績效→組 DTO。
 /// 不碰檔案系統或網路，方便直接餵假資料測試。
-fn summarize(
+///
+/// 抽出 `strategy`/`strategy_id`/`strategy_name` 三個參數（不是直接用
+/// `BacktestRequest.strategy_id` 查表），是因為 3.7 比較頁的 BTC 買入持有基準
+/// （[`run_buy_hold_baseline_command`]）要跑同一套「建 config→跑回測→算績效→組
+/// DTO」流程，但它的策略不經過 [`build_strategy`] 查表（基準策略不開放給使用者
+/// 在策略庫選），兩邊共用這個函式就不必各寫一份 `BacktestSummary` 組裝邏輯。
+#[allow(clippy::too_many_arguments)]
+fn summarize_with_strategy(
     bars: &[Bar],
-    request: &BacktestRequest,
+    symbol: &str,
+    interval: &str,
+    year: u32,
+    month: u32,
+    params: HashMap<String, String>,
+    starting_capital: &str,
+    strategy: &mut dyn Strategy,
+    strategy_id: &str,
+    strategy_name: &str,
     data_source_path: &Path,
 ) -> Result<BacktestSummary, String> {
-    let capital = request
-        .starting_capital
+    let capital = starting_capital
         .trim()
         .parse::<Fixed>()
-        .map_err(|e| format!("起始資金不是合法數字（{}）：{e}", request.starting_capital))?;
-
-    let mut strategy = build_strategy(&request.strategy_id, &request.params)?;
-    let strategy_name = strategy_display_name(&request.strategy_id)?;
+        .map_err(|e| format!("起始資金不是合法數字（{starting_capital}）：{e}"))?;
 
     let config = BacktestConfig {
         fees: Some(FeeModel::spot_vip0()),
@@ -168,18 +179,17 @@ fn summarize(
         ..BacktestConfig::frictionless(capital)
     };
 
-    let result =
-        run_backtest(bars, strategy.as_mut(), &config).map_err(|e| format!("回測執行失敗：{e}"))?;
+    let result = run_backtest(bars, strategy, &config).map_err(|e| format!("回測執行失敗：{e}"))?;
     let metrics = Metrics::from_curve(&result.curve);
 
     Ok(BacktestSummary {
-        symbol: request.symbol.clone(),
-        interval: request.interval.clone(),
-        year: request.year,
-        month: request.month,
-        strategy_id: request.strategy_id.clone(),
-        strategy_name,
-        params: request.params.clone(),
+        symbol: symbol.to_string(),
+        interval: interval.to_string(),
+        year,
+        month,
+        strategy_id: strategy_id.to_string(),
+        strategy_name: strategy_name.to_string(),
+        params,
         starting_capital: capital.to_string(),
         bar_count: bars.len(),
         curve: result
@@ -201,6 +211,96 @@ fn summarize(
         slippage: DEFAULT_SLIPPAGE.to_string(),
         data_source_path: data_source_path.display().to_string(),
     })
+}
+
+/// 純邏輯：拿到 K 線之後的「建立策略→跑回測→算績效→組 DTO」，
+/// 不碰檔案系統或網路，方便直接餵假資料測試。
+fn summarize(
+    bars: &[Bar],
+    request: &BacktestRequest,
+    data_source_path: &Path,
+) -> Result<BacktestSummary, String> {
+    let mut strategy = build_strategy(&request.strategy_id, &request.params)?;
+    let strategy_name = strategy_display_name(&request.strategy_id)?;
+
+    summarize_with_strategy(
+        bars,
+        &request.symbol,
+        &request.interval,
+        request.year,
+        request.month,
+        request.params.clone(),
+        &request.starting_capital,
+        strategy.as_mut(),
+        &request.strategy_id,
+        &strategy_name,
+        data_source_path,
+    )
+}
+
+/// 永遠全倉做多，不需要暖機、不需要參數。只給 3.7 比較頁內部用來跑「BTC 買入
+/// 持有」基準曲線——刻意不透過 [`build_strategy`]／`strategies::builtin_strategies()`
+/// 查表註冊，才不會讓它出現在使用者看得到的策略庫。
+struct BuyAndHold;
+
+impl Strategy for BuyAndHold {
+    fn on_bar(&mut self, _bar: &Bar) -> TargetPosition {
+        TargetPosition::FULL_LONG
+    }
+}
+
+/// 基準策略固定用這個代號／顯示名稱，比較頁前端用代號判斷「這是基準列，不是
+/// 使用者自己跑的回測」。
+pub const BUY_HOLD_STRATEGY_ID: &str = "_buy_hold_baseline";
+const BUY_HOLD_STRATEGY_NAME: &str = "BTC 買入持有";
+
+/// [`run_buy_hold_baseline_command`] 的輸入：固定抓 BTCUSDT，只需要跟使用者
+/// 要比較的那幾筆回測一樣的週期／年月／起始資金。
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BuyHoldBaselineRequest {
+    pub interval: String,
+    pub year: u32,
+    pub month: u32,
+    pub starting_capital: String,
+}
+
+/// 3.7 比較頁用的 Tauri command：跑一次「全程持有 BTC」當比較基準，回傳格式
+/// 跟 `run_backtest_command` 一樣的 [`BacktestSummary`]，前端不用另外處理。
+#[tauri::command]
+pub async fn run_buy_hold_baseline_command(
+    app: tauri::AppHandle,
+    request: BuyHoldBaselineRequest,
+) -> Result<BacktestSummary, String> {
+    let symbol = Symbol::new("BTCUSDT").expect("BTCUSDT 是合法交易對代號");
+    let interval: Interval = request
+        .interval
+        .parse()
+        .map_err(|e: at_core::ParseIntervalError| e.to_string())?;
+
+    let base_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("找不到應用程式資料目錄：{e}"))?
+        .join("klines");
+
+    let (bars, data_source_path) =
+        load_bars(base_dir, symbol, interval, request.year, request.month).await?;
+
+    let mut strategy = BuyAndHold;
+    summarize_with_strategy(
+        &bars,
+        "BTCUSDT",
+        &request.interval,
+        request.year,
+        request.month,
+        HashMap::new(),
+        &request.starting_capital,
+        &mut strategy,
+        BUY_HOLD_STRATEGY_ID,
+        BUY_HOLD_STRATEGY_NAME,
+        &data_source_path,
+    )
 }
 
 /// 這個月的 K 線本機有就直接讀，沒有就下載（會連網路）。
@@ -503,5 +603,55 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base_dir).ok();
+    }
+
+    #[test]
+    fn buy_and_hold_always_targets_full_long() {
+        let mut strategy = BuyAndHold;
+        let bar = trending_bars()[0];
+        assert_eq!(strategy.on_bar(&bar), TargetPosition::FULL_LONG);
+        // 不管哪一根 K 線、策略有沒有「記憶」，永遠回滿倉做多——這是基準策略
+        // 唯一需要保證的事。
+        assert_eq!(strategy.on_bar(&bar), TargetPosition::FULL_LONG);
+    }
+
+    #[test]
+    fn buy_hold_baseline_summary_matches_a_direct_full_long_run() {
+        let bars = trending_bars();
+
+        let mut baseline_strategy = BuyAndHold;
+        let summary = summarize_with_strategy(
+            &bars,
+            "BTCUSDT",
+            "1h",
+            2024,
+            1,
+            HashMap::new(),
+            "10000",
+            &mut baseline_strategy,
+            BUY_HOLD_STRATEGY_ID,
+            BUY_HOLD_STRATEGY_NAME,
+            Path::new("/tmp/fake.csv"),
+        )
+        .unwrap();
+
+        let config = BacktestConfig {
+            fees: Some(FeeModel::spot_vip0()),
+            slippage: DEFAULT_SLIPPAGE,
+            ..BacktestConfig::frictionless(fx("10000"))
+        };
+        let mut direct_strategy = BuyAndHold;
+        let direct = run_backtest(&bars, &mut direct_strategy, &config).unwrap();
+
+        assert_eq!(summary.strategy_id, "_buy_hold_baseline");
+        assert_eq!(summary.strategy_name, "BTC 買入持有");
+        assert!(summary.params.is_empty());
+        assert_eq!(
+            summary.curve.last().unwrap().equity,
+            direct.curve.last().unwrap().equity.to_string()
+        );
+        assert_eq!(summary.trades, direct.trades);
+        // 從頭到尾都持有、K 線一路上漲，應該只開一次倉，不會中途再交易。
+        assert_eq!(summary.trades, 1);
     }
 }
