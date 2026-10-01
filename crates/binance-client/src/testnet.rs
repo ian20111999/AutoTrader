@@ -7,6 +7,14 @@
 //! `demo-mode/general-info` 文件確認）。路徑／簽名機制／回應格式都沒變，只有
 //! base URL 不同，所以只改 [`TESTNET_BASE_URL`] 這一個常數。
 //!
+//! 這一個常數值得比一般設定更高規格的查證——改錯會讓簽名過的下單請求送到
+//! 別的地方。查證過三個獨立來源：(1) 使用者自己 Binance 帳戶頁面上顯示的
+//! 官方文件連結跟 `developers.binance.com/docs/.../demo-mode/general-info`
+//! 完全一致；(2) 該官方文件逐字列出 base URL 就是
+//! `https://demo-api.binance.com/api`；(3) TLS 憑證（`openssl s_client`
+//! 查證）：`subject=O=Binance Holdings Limited, CN=*.binance.com`，
+//! DigiCert 簽發——不是隨便哪個網域能偽造的憑證。
+//!
 //! ROADMAP 6.1（Keychain 憑證獨立存放）＋ 6.2（下單 client）。這是整個專案
 //! 第一次出現「送出訂單」的程式碼路徑，所以刻意不共用 [`crate::BinanceClient`]
 //! 的 `base_url` 欄位——那個欄位是可變的 `String`，日後只要有人改錯一個預設值
@@ -485,10 +493,15 @@ mod tests {
             url.starts_with("https://demo-api.binance.com/api/v3/order?"),
             "網址必須是測試網（Demo Trading）的下單端點：{url}"
         );
-        assert!(
-            !url.starts_with("https://api.binance.com"),
-            "絕對不能連到正式環境：{url}"
-        );
+        // 不用字串前綴/子字串比對，直接切出「真正會連線的 host」再精確比對——
+        // `demo-api.binance.com` 本身就含有 `api.binance.com` 這個子字串，
+        // 寬鬆的 `contains`/`starts_with` 檢查在這個案例會誤判；只有「host
+        // 部分完全等於正式環境網域」才是真的危險。
+        let host = url
+            .strip_prefix("https://")
+            .and_then(|rest| rest.split('/').next())
+            .unwrap_or(url.as_str());
+        assert_ne!(host, "api.binance.com", "絕對不能連到正式環境：{url}");
         assert!(url.contains("signature="), "必須附上簽名：{url}");
     }
 
