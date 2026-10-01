@@ -1,3 +1,4 @@
+mod account_permissions;
 mod backtest;
 mod paper_trading;
 mod settings;
@@ -5,6 +6,7 @@ mod strategies;
 mod testnet_settings;
 mod testnet_trading;
 
+use account_permissions::check_account_permissions;
 use backtest::run_backtest_command;
 use paper_trading::{
     paper_trading_status, start_paper_trading, stop_paper_trading, PaperTradingState,
@@ -51,6 +53,7 @@ pub fn run() {
             save_binance_credentials,
             binance_credentials_status,
             clear_binance_credentials,
+            check_account_permissions,
             start_paper_trading,
             stop_paper_trading,
             paper_trading_status,

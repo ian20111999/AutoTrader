@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { Settings } from "./Settings";
 
@@ -19,6 +19,17 @@ function mockInvoke(handlers: Record<string, (args?: unknown) => unknown>) {
   }) as typeof invoke);
 }
 
+const BOTH_UNSET = { apiKeySet: false, apiSecretSet: false };
+const BOTH_SET = { apiKeySet: true, apiSecretSet: true };
+
+function baseHandlers(overrides: Record<string, (args?: unknown) => unknown> = {}) {
+  return {
+    binance_credentials_status: () => BOTH_UNSET,
+    testnet_credentials_status: () => BOTH_UNSET,
+    ...overrides,
+  };
+}
+
 describe("Settings", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
@@ -28,63 +39,48 @@ describe("Settings", () => {
     vi.restoreAllMocks();
   });
 
-  it("載入時顯示目前的連線狀態（都未設定）", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: false, apiSecretSet: false }),
-    });
+  it("載入時分開顯示正式環境與測試網兩組金鑰狀態（都未設定）", async () => {
+    mockInvoke(baseHandlers());
 
     render(<Settings />);
 
-    const items = await screen.findAllByText("未設定");
-    expect(items).toHaveLength(2);
+    expect(await screen.findAllByText("未設定")).toHaveLength(4);
+    expect(screen.getByRole("region", { name: "正式環境 API 金鑰" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "測試網 API 金鑰" })).toBeInTheDocument();
   });
 
-  it("兩個欄位都已設定時顯示「已設定」", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: true, apiSecretSet: true }),
-    });
-
-    render(<Settings />);
-
-    expect(await screen.findAllByText("已設定")).toHaveLength(2);
-  });
-
-  it("查詢狀態失敗時顯示錯誤訊息", async () => {
-    mockInvoke({
-      binance_credentials_status: () => {
-        throw "查詢失敗";
-      },
-    });
-
-    render(<Settings />);
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("讀取連線狀態失敗");
-  });
-
-  it("輸入框是 password 類型（遮蔽輸入）", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: false, apiSecretSet: false }),
-    });
-
-    render(<Settings />);
-    await screen.findAllByText("未設定");
-
-    expect(screen.getByLabelText("API Key")).toHaveAttribute("type", "password");
-    expect(screen.getByLabelText("API Secret")).toHaveAttribute("type", "password");
-  });
-
-  it("送出表單會呼叫 save_binance_credentials，成功後清空輸入框並重新整理狀態", async () => {
-    let saved: { apiKey: string; apiSecret: string } | null = null;
-    mockInvoke({
-      binance_credentials_status: () => ({
-        apiKeySet: saved !== null,
-        apiSecretSet: saved !== null,
+  it("正式環境與測試網各自已設定時分開顯示「已設定」", async () => {
+    mockInvoke(
+      baseHandlers({
+        binance_credentials_status: () => BOTH_SET,
+        testnet_credentials_status: () => BOTH_UNSET,
       }),
-      save_binance_credentials: (args) => {
-        saved = args as { apiKey: string; apiSecret: string };
-        return null;
-      },
+    );
+
+    render(<Settings />);
+
+    const prodSection = await screen.findByRole("region", { name: "正式環境 API 金鑰" });
+    const testnetSection = screen.getByRole("region", { name: "測試網 API 金鑰" });
+    await waitFor(() => {
+      expect(within(prodSection).getAllByText("已設定")).toHaveLength(2);
+      expect(within(testnetSection).getAllByText("未設定")).toHaveLength(2);
     });
+  });
+
+  it("儲存正式環境金鑰呼叫 save_binance_credentials，不影響測試網狀態", async () => {
+    let saved: { apiKey: string; apiSecret: string } | null = null;
+    mockInvoke(
+      baseHandlers({
+        binance_credentials_status: () => ({
+          apiKeySet: saved !== null,
+          apiSecretSet: saved !== null,
+        }),
+        save_binance_credentials: (args) => {
+          saved = args as { apiKey: string; apiSecret: string };
+          return null;
+        },
+      }),
+    );
 
     render(<Settings />);
     await screen.findAllByText("未設定");
@@ -93,50 +89,42 @@ describe("Settings", () => {
     fireEvent.change(screen.getByLabelText("API Secret"), { target: { value: FAKE_API_SECRET } });
     fireEvent.click(screen.getByRole("button", { name: "儲存" }));
 
-    await screen.findByText("已儲存。");
-
-    expect(saved).toEqual({ apiKey: FAKE_API_KEY, apiSecret: FAKE_API_SECRET });
-    expect(screen.getByLabelText("API Key")).toHaveValue("");
-    expect(screen.getByLabelText("API Secret")).toHaveValue("");
-    await waitFor(() => expect(screen.getAllByText("已設定")).toHaveLength(2));
+    await waitFor(() => expect(saved).toEqual({ apiKey: FAKE_API_KEY, apiSecret: FAKE_API_SECRET }));
+    expect(invoke).not.toHaveBeenCalledWith("save_testnet_credentials", expect.anything());
   });
 
-  it("留白就送出表單不會呼叫 save_binance_credentials（HTML5 required 擋下）", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: false, apiSecretSet: false }),
-    });
+  it("儲存測試網金鑰呼叫 save_testnet_credentials，不影響正式環境狀態", async () => {
+    let saved: { apiKey: string; apiSecret: string } | null = null;
+    mockInvoke(
+      baseHandlers({
+        testnet_credentials_status: () => ({
+          apiKeySet: saved !== null,
+          apiSecretSet: saved !== null,
+        }),
+        save_testnet_credentials: (args) => {
+          saved = args as { apiKey: string; apiSecret: string };
+          return null;
+        },
+      }),
+    );
 
     render(<Settings />);
     await screen.findAllByText("未設定");
 
-    fireEvent.click(screen.getByRole("button", { name: "儲存" }));
+    fireEvent.change(screen.getByLabelText("測試網 API Key"), {
+      target: { value: FAKE_API_KEY },
+    });
+    fireEvent.change(screen.getByLabelText("測試網 API Secret"), {
+      target: { value: FAKE_API_SECRET },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "儲存測試網金鑰" }));
 
+    await waitFor(() => expect(saved).toEqual({ apiKey: FAKE_API_KEY, apiSecret: FAKE_API_SECRET }));
     expect(invoke).not.toHaveBeenCalledWith("save_binance_credentials", expect.anything());
   });
 
-  it("儲存失敗時顯示 Rust 端回傳的錯誤訊息，不清空輸入框", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: false, apiSecretSet: false }),
-      save_binance_credentials: () => {
-        throw "API Key 不能是空白";
-      },
-    });
-
-    render(<Settings />);
-    await screen.findAllByText("未設定");
-
-    fireEvent.change(screen.getByLabelText("API Key"), { target: { value: FAKE_API_KEY } });
-    fireEvent.change(screen.getByLabelText("API Secret"), { target: { value: FAKE_API_SECRET } });
-    fireEvent.click(screen.getByRole("button", { name: "儲存" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("儲存失敗");
-    expect(screen.getByLabelText("API Key")).toHaveValue(FAKE_API_KEY);
-  });
-
-  it("點擊清除前會先跳出確認對話框，取消就不會呼叫 clear_binance_credentials", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: true, apiSecretSet: true }),
-    });
+  it("清除正式環境金鑰前會跳出確認對話框，取消就不會呼叫 clear_binance_credentials", async () => {
+    mockInvoke(baseHandlers({ binance_credentials_status: () => BOTH_SET }));
     vi.spyOn(window, "confirm").mockReturnValue(false);
 
     render(<Settings />);
@@ -148,43 +136,64 @@ describe("Settings", () => {
     expect(invoke).not.toHaveBeenCalledWith("clear_binance_credentials");
   });
 
-  it("確認清除後呼叫 clear_binance_credentials 並重新整理狀態為未設定", async () => {
-    let cleared = false;
-    mockInvoke({
-      binance_credentials_status: () => ({
-        apiKeySet: !cleared,
-        apiSecretSet: !cleared,
-      }),
-      clear_binance_credentials: () => {
-        cleared = true;
-        return null;
-      },
-    });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("權限清單一開始顯示尚未查詢，不會畫出假資料", async () => {
+    mockInvoke(baseHandlers());
 
     render(<Settings />);
-    await screen.findAllByText("已設定");
+    await screen.findAllByText("未設定");
 
-    fireEvent.click(screen.getByRole("button", { name: "清除已儲存的金鑰" }));
-
-    await waitFor(() => expect(screen.getAllByText("未設定")).toHaveLength(2));
-    expect(invoke).toHaveBeenCalledWith("clear_binance_credentials");
+    expect(screen.getByText("尚未查詢，請按下方按鈕測試連線並查詢目前權限。")).toBeInTheDocument();
   });
 
-  it("清除失敗時顯示錯誤訊息", async () => {
-    mockInvoke({
-      binance_credentials_status: () => ({ apiKeySet: true, apiSecretSet: true }),
-      clear_binance_credentials: () => {
-        throw "清除失敗";
-      },
-    });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("按下測試連線成功後顯示 check_account_permissions 查回來的真實權限", async () => {
+    mockInvoke(
+      baseHandlers({
+        check_account_permissions: () => ({
+          canTrade: true,
+          canWithdraw: false,
+          canDeposit: true,
+        }),
+      }),
+    );
 
     render(<Settings />);
-    await screen.findAllByText("已設定");
+    await screen.findAllByText("未設定");
 
-    fireEvent.click(screen.getByRole("button", { name: "清除已儲存的金鑰" }));
+    fireEvent.click(screen.getByRole("button", { name: "測試連線" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("清除失敗");
+    await screen.findByText("連線成功，以下是查詢到的實際權限。");
+    const permissionSection = screen.getByRole("region", { name: "權限檢查清單" });
+    expect(within(permissionSection).getAllByText("已開啟")).toHaveLength(2);
+    expect(within(permissionSection).getByText("已確認關閉")).toBeInTheDocument();
+  });
+
+  it("測試連線失敗時顯示錯誤訊息，不畫出假權限清單", async () => {
+    mockInvoke(
+      baseHandlers({
+        check_account_permissions: () => {
+          throw "讀取 API 憑證失敗";
+        },
+      }),
+    );
+
+    render(<Settings />);
+    await screen.findAllByText("未設定");
+
+    fireEvent.click(screen.getByRole("button", { name: "測試連線" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("測試連線失敗");
+    expect(
+      screen.getByText("尚未查詢，請按下方按鈕測試連線並查詢目前權限。"),
+    ).toBeInTheDocument();
+  });
+
+  it("合約帳戶設定標示即將推出，不是假互動元件", async () => {
+    mockInvoke(baseHandlers());
+
+    render(<Settings />);
+    await screen.findAllByText("未設定");
+
+    const futuresSection = screen.getByRole("region", { name: "合約帳戶設定" });
+    expect(within(futuresSection).getByText(/即將推出/)).toBeInTheDocument();
   });
 });

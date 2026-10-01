@@ -54,6 +54,6 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "設定" }));
     expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Binance 連線狀態" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "正式環境 API 金鑰" })).toBeInTheDocument();
   });
 });
