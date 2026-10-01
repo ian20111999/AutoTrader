@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { CompareChart } from "./CompareChart";
 import { colorForIndex } from "./compareColors";
 import type { BacktestSummary } from "./backtestTypes";
@@ -64,6 +64,25 @@ describe("CompareChart", () => {
     expect(
       screen.getByText("目前的回測都沒有足夠的權益曲線資料可以疊圖。"),
     ).toBeInTheDocument();
+  });
+
+  it("預設顯示累積報酬，點「回撤」切換後圖表的 aria-label 跟著變", () => {
+    render(<CompareChart runs={[run()]} />);
+
+    expect(screen.getByRole("button", { name: "累積報酬" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("img", { name: /累積報酬疊圖/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "回撤" }));
+
+    expect(screen.getByRole("button", { name: "回撤" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "累積報酬" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    expect(screen.getByRole("img", { name: /回撤疊圖/ })).toBeInTheDocument();
   });
 });
 

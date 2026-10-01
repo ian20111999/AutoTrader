@@ -1,5 +1,7 @@
+import { useState } from "react";
 import type { BacktestSummary } from "./backtestTypes";
 import { colorForIndex } from "./compareColors";
+import { toDrawdownSeries, toReturnSeries } from "./compareMetrics";
 
 // 疊圖比較的核心問題：每筆回測是不同交易對/不同月份，時間戳完全對不上，直接照
 // openTime 畫在同一個時間軸只會讓曲線散在圖的不同區域，比較不出東西。用「這筆
@@ -13,12 +15,6 @@ import { colorForIndex } from "./compareColors";
 // 多畫一條線），不需要學一個圖表函式庫的 API 或多背一個依賴；沒有要做 tooltip、
 // 縮放、log 座標這些真的需要函式庫的互動需求。
 
-function toReturnSeries(run: BacktestSummary): number[] {
-  const starting = Number(run.startingCapital);
-  if (starting === 0) return run.curve.map(() => 0);
-  return run.curve.map((point) => (Number(point.equity) / starting - 1) * 100);
-}
-
 interface CompareChartProps {
   runs: BacktestSummary[];
 }
@@ -27,17 +23,59 @@ const WIDTH = 900;
 const HEIGHT = 220;
 const PADDING = 8;
 
+type ChartView = "return" | "drawdown";
+
+const VIEW_LABELS: Record<ChartView, string> = {
+  return: "累積報酬",
+  drawdown: "回撤",
+};
+
 export function CompareChart({ runs }: CompareChartProps) {
+  const [view, setView] = useState<ChartView>("return");
+  const toSeries = view === "return" ? toReturnSeries : toDrawdownSeries;
+
   const series = runs.map((run, index) => ({
     color: colorForIndex(index),
-    values: toReturnSeries(run),
+    values: toSeries(run),
   }));
   const plottable = series.filter((s) => s.values.length >= 2);
 
-  if (plottable.length === 0) {
-    return <p className="compare-chart__empty">目前的回測都沒有足夠的權益曲線資料可以疊圖。</p>;
-  }
+  const ariaLabel =
+    view === "return"
+      ? "多筆回測的累積報酬疊圖，橫軸是各自回測期間的相對進度，不是日曆時間"
+      : "多筆回測的回撤疊圖，橫軸是各自回測期間的相對進度，不是日曆時間";
 
+  return (
+    <div className="compare-chart-view">
+      <div className="compare-chart-view__toggle" role="group" aria-label="疊圖檢視切換">
+        {(Object.keys(VIEW_LABELS) as ChartView[]).map((key) => (
+          <button
+            key={key}
+            type="button"
+            className="compare-chart-view__toggle-button"
+            aria-pressed={view === key}
+            onClick={() => setView(key)}
+          >
+            {VIEW_LABELS[key]}
+          </button>
+        ))}
+      </div>
+      {plottable.length === 0 ? (
+        <p className="compare-chart__empty">目前的回測都沒有足夠的權益曲線資料可以疊圖。</p>
+      ) : (
+        <CompareChartSvg plottable={plottable} ariaLabel={ariaLabel} />
+      )}
+    </div>
+  );
+}
+
+function CompareChartSvg({
+  plottable,
+  ariaLabel,
+}: {
+  plottable: { color: string; values: number[] }[];
+  ariaLabel: string;
+}) {
   const allValues = plottable.flatMap((s) => s.values).concat(0);
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
@@ -47,12 +85,7 @@ export function CompareChart({ runs }: CompareChartProps) {
   const zeroY = toY(0);
 
   return (
-    <svg
-      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-      className="compare-chart"
-      role="img"
-      aria-label="多筆回測的累積報酬疊圖，橫軸是各自回測期間的相對進度，不是日曆時間"
-    >
+    <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="compare-chart" role="img" aria-label={ariaLabel}>
       <line
         x1={PADDING}
         y1={zeroY}
