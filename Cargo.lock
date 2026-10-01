@@ -235,6 +235,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "at-portfolio-risk"
+version = "0.1.0"
+dependencies = [
+ "at-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "at-risk-control"
 version = "0.1.0"
 dependencies = [
