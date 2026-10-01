@@ -1,4 +1,11 @@
-//! 測試網（`testnet.binance.vision`）下單：市價單下單＋查詢訂單狀態＋撤單。
+//! 測試網下單：市價單下單＋查詢訂單狀態＋撤單。
+//!
+//! Binance 已經把現貨測試網從 `testnet.binance.vision` 遷移到新的「Demo
+//! Trading」服務 `demo-api.binance.com`（舊網址仍在，但簽名過的端點一律回
+//! `-2015 Invalid API-key, IP, or permissions for action`，不管金鑰對不對都
+//! 一樣——這是遷移後的已知行為，不是這個專案的錯誤；6.6 實測時發現並對照官方
+//! `demo-mode/general-info` 文件確認）。路徑／簽名機制／回應格式都沒變，只有
+//! base URL 不同，所以只改 [`TESTNET_BASE_URL`] 這一個常數。
 //!
 //! ROADMAP 6.1（Keychain 憑證獨立存放）＋ 6.2（下單 client）。這是整個專案
 //! 第一次出現「送出訂單」的程式碼路徑，所以刻意不共用 [`crate::BinanceClient`]
@@ -33,8 +40,8 @@ use at_secrets::{CredentialStore, KeychainStore, SecretValue};
 use serde::Deserialize;
 use std::fmt;
 
-/// 測試網的網址，寫死在這裡、不開放呼叫端指定。
-const TESTNET_BASE_URL: &str = "https://testnet.binance.vision";
+/// 測試網（現在叫「Demo Trading」）的網址，寫死在這裡、不開放呼叫端指定。
+const TESTNET_BASE_URL: &str = "https://demo-api.binance.com";
 /// 6.5 的連線設定頁面要存/查/清同一組 Keychain 項目，所以公開出去，
 /// 不在 `app` crate 裡重複寫一份字串常數（改一邊忘改一邊的風險）。
 pub const TESTNET_SERVICE_API_KEY: &str = "com.autotrader.app.binance-testnet-api-key";
@@ -475,24 +482,25 @@ mod tests {
             .signed_url(&[("symbol", "BTCUSDT")])
             .expect("系統時間必須算得出來");
         assert!(
-            url.starts_with("https://testnet.binance.vision/api/v3/order?"),
-            "網址必須是測試網的下單端點：{url}"
+            url.starts_with("https://demo-api.binance.com/api/v3/order?"),
+            "網址必須是測試網（Demo Trading）的下單端點：{url}"
         );
         assert!(
-            !url.contains("api.binance.com"),
+            !url.starts_with("https://api.binance.com"),
             "絕對不能連到正式環境：{url}"
         );
         assert!(url.contains("signature="), "必須附上簽名：{url}");
     }
 
-    /// 實際對測試網（`testnet.binance.vision`）下一張市價單、再查詢一次，
-    /// 驗證簽名＋下單＋解析整條路徑真的是通的。
+    /// 實際對測試網（Demo Trading，`demo-api.binance.com`）下一張市價單、
+    /// 再查詢一次，驗證簽名＋下單＋解析整條路徑真的是通的。
     ///
     /// 不在 `cargo test` 預設跑：
     /// - 需要 6.1 的測試網專用 Keychain 憑證（`com.autotrader.app.binance-testnet-api-key`
     ///   / `-api-secret`，account `autotrader`），這個開發環境裡沒有，必須由
-    ///   使用者自己去 <https://testnet.binance.vision/> 申請後存進 Keychain
-    ///   才能跑。
+    ///   使用者自己去 <https://testnet.binance.vision/> 的「API 管理」頁面
+    ///   申請（網站名稱還是舊的，但產生出來的金鑰是給新的 Demo Trading
+    ///   `demo-api.binance.com` 用的）後存進 Keychain 才能跑。
     /// - 下單數量 `0.001` BTC 是抓一個大致合理的下限，測試網當下的
     ///   `LOT_SIZE`/`MIN_NOTIONAL` 規則不同時可能需要調整才會成功——這條
     ///   還沒有實際跑過，數量只是起點，不保證直接過。

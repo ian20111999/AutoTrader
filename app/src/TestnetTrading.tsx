@@ -265,7 +265,7 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
     <div className="backtest">
       <form className="backtest-form" onSubmit={handleStart} noValidate>
         <p role="alert" className="testnet-warning">
-          這個頁面會對 Binance 測試網（testnet.binance.vision）送出真實訂單，不是模擬交易。
+          這個頁面會對 Binance 測試網（Demo Trading）送出真實訂單，不是模擬交易。
           測試網資產沒有實際價值，但下單、成交、風控都是真的在跑。
         </p>
 

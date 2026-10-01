@@ -1,7 +1,7 @@
 //! 6.5 測試網交易頁面的 Tauri command 橋接：開始/停止/一鍵停止/查詢狀態 +
 //! 事件轉發。架構抄 `paper_trading.rs`（背景執行緒把 `updates` channel 轉成
 //! Tauri 事件），這裡是整個專案第一次會在 UI 上真的送出訂單（僅限
-//! `testnet.binance.vision`），所以每個 command 的輸入都要先過
+//! 測試網 Demo Trading），所以每個 command 的輸入都要先過
 //! [`validate_request`] 這一關，不連網路也不開執行緒。
 //!
 //! # 跟 `paper_trading.rs` 不一樣的地方：怎麼做「一鍵停止」
