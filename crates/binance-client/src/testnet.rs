@@ -35,9 +35,11 @@ use std::fmt;
 
 /// 測試網的網址，寫死在這裡、不開放呼叫端指定。
 const TESTNET_BASE_URL: &str = "https://testnet.binance.vision";
-const TESTNET_SERVICE_API_KEY: &str = "com.autotrader.app.binance-testnet-api-key";
-const TESTNET_SERVICE_API_SECRET: &str = "com.autotrader.app.binance-testnet-api-secret";
-const TESTNET_ACCOUNT: &str = "autotrader";
+/// 6.5 的連線設定頁面要存/查/清同一組 Keychain 項目，所以公開出去，
+/// 不在 `app` crate 裡重複寫一份字串常數（改一邊忘改一邊的風險）。
+pub const TESTNET_SERVICE_API_KEY: &str = "com.autotrader.app.binance-testnet-api-key";
+pub const TESTNET_SERVICE_API_SECRET: &str = "com.autotrader.app.binance-testnet-api-secret";
+pub const TESTNET_ACCOUNT: &str = "autotrader";
 const ORDER_PATH: &str = "/api/v3/order";
 
 /// 下單方向。

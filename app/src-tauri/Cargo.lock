@@ -62,11 +62,15 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "at-account-sync",
+ "at-binance",
  "at-core",
  "at-downloader",
  "at-market-stream",
  "at-paper-trading",
+ "at-risk-control",
  "at-secrets",
+ "at-testnet-trading",
  "serde",
  "serde_json",
  "tauri",
@@ -226,6 +230,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "at-account-sync"
+version = "0.1.0"
+dependencies = [
+ "at-binance",
+ "at-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "at-binance"
+version = "0.1.0"
+dependencies = [
+ "at-core",
+ "at-secrets",
+ "hmac",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "ureq",
+]
+
+[[package]]
 name = "at-core"
 version = "0.1.0"
 
@@ -258,10 +285,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "at-risk-control"
+version = "0.1.0"
+dependencies = [
+ "at-core",
+]
+
+[[package]]
 name = "at-secrets"
 version = "0.1.0"
 dependencies = [
  "keyring",
+]
+
+[[package]]
+name = "at-testnet-trading"
+version = "0.1.0"
+dependencies = [
+ "at-binance",
+ "at-core",
+ "at-market-stream",
+ "at-risk-control",
 ]
 
 [[package]]

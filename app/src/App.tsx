@@ -6,6 +6,7 @@ import { Strategies } from "./Strategies";
 import { Backtest } from "./Backtest";
 import { Compare } from "./Compare";
 import { PaperTrading } from "./PaperTrading";
+import { TestnetTrading } from "./TestnetTrading";
 import { Settings } from "./Settings";
 import { NAV_ITEMS, type PageId } from "./nav";
 import type { StrategyConfig } from "./strategyTypes";
@@ -50,6 +51,12 @@ function App() {
           )}
           {page === "paperTrading" && (
             <PaperTrading
+              strategyConfig={strategyConfig}
+              onGoToStrategies={() => setPage("strategies")}
+            />
+          )}
+          {page === "testnetTrading" && (
+            <TestnetTrading
               strategyConfig={strategyConfig}
               onGoToStrategies={() => setPage("strategies")}
             />

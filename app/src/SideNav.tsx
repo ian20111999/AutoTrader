@@ -30,6 +30,13 @@ const ICONS: Record<PageId, ReactElement> = {
       <path d="M7 15h10" />
     </>
   ),
+  // 測試網交易：跟模擬交易同一個燒瓶輪廓，加一個警示感的閃電，代表「這次是真的送單」。
+  testnetTrading: (
+    <>
+      <path d="M9 3h6M10 3v6l-5.5 9.5A2 2 0 0 0 6.2 21h11.6a2 2 0 0 0 1.7-2.5L14 9V3" />
+      <path d="M13 10l-3 4h2l-1 4 4-5h-2l1-3z" />
+    </>
+  ),
   settings: (
     <>
       <circle cx="12" cy="12" r="3" />

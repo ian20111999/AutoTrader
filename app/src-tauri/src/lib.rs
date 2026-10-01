@@ -2,6 +2,8 @@ mod backtest;
 mod paper_trading;
 mod settings;
 mod strategies;
+mod testnet_settings;
+mod testnet_trading;
 
 use backtest::run_backtest_command;
 use paper_trading::{
@@ -9,6 +11,13 @@ use paper_trading::{
 };
 use settings::{binance_credentials_status, clear_binance_credentials, save_binance_credentials};
 use strategies::StrategyInfo;
+use testnet_settings::{
+    clear_testnet_credentials, save_testnet_credentials, testnet_credentials_status,
+};
+use testnet_trading::{
+    set_testnet_kill_switch, start_testnet_trading, stop_testnet_trading, testnet_trading_status,
+    TestnetTradingState,
+};
 
 // 證明 Tauri 的 Rust 殼能呼叫 at-core 的型別（3.1 鋪的路，3.2 的
 // list_builtin_strategies 走同一條依賴路徑）。
@@ -34,6 +43,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PaperTradingState::default())
+        .manage(TestnetTradingState::default())
         .invoke_handler(tauri::generate_handler![
             at_core_version,
             list_builtin_strategies,
@@ -43,7 +53,14 @@ pub fn run() {
             clear_binance_credentials,
             start_paper_trading,
             stop_paper_trading,
-            paper_trading_status
+            paper_trading_status,
+            save_testnet_credentials,
+            testnet_credentials_status,
+            clear_testnet_credentials,
+            start_testnet_trading,
+            stop_testnet_trading,
+            set_testnet_kill_switch,
+            testnet_trading_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

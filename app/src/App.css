@@ -867,3 +867,79 @@ a:hover {
 .paper-trading-stop {
   align-self: flex-start;
 }
+
+/* 測試網交易頁面：表單/結果版面繼續重用 backtest-、paper-trading- 系列 class，
+   這裡只加「這是真的送單」需要的警示與一鍵停止/停止兩個獨立按鈕。 */
+
+.testnet-warning {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.testnet-trading-last-order {
+  color: var(--text-secondary);
+}
+
+.testnet-trading-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 8px;
+}
+
+.testnet-trading-killswitch {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+}
+
+.testnet-trading-killswitch__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.testnet-trading-killswitch__button {
+  min-height: 36px;
+  padding: 0 16px;
+  background: var(--danger);
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.testnet-trading-killswitch__button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.testnet-trading-killswitch__button[aria-pressed="true"] {
+  background: var(--positive);
+}
+
+.testnet-trading-stop {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.testnet-trading-stop__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
