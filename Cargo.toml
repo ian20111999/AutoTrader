@@ -8,6 +8,7 @@ members = [
     "crates/engine",
     "crates/market-stream",
     "crates/paper-trading",
+    "crates/risk-control",
     "crates/secret-store",
 ]
 

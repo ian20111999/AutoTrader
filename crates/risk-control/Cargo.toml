@@ -1,0 +1,10 @@
+[package]
+name = "at-risk-control"
+description = "下單前的風控閘門：每日虧損上限、一鍵停止、單筆下單金額上限（純邏輯，不連網路）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+at-core = { path = "../core" }
