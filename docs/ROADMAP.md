@@ -107,11 +107,16 @@
 ### 6. 測試網下單＋風控
 使用者已同意跨過「第一次出現送單程式碼」這條安全線，僅限測試網；正式環境下單是第7步，
 需要另一次明確同意。詳細計畫見 `docs/plans/2026-10-01-testnet-trading.md`。
-- [ ] 6.1 Testnet 金鑰獨立存放：Keychain 新增一組 testnet 專用 service name，跟 4.1 正式環境
+- [x] 6.1 Testnet 金鑰獨立存放：Keychain 新增一組 testnet 專用 service name，跟 4.1 正式環境
       唯讀金鑰分開
-- [ ] 6.2 Testnet REST client＋下單簽名：`base_url` 可指向 testnet，簽名過的 POST 下單
-      （市價單）＋查詢訂單狀態＋撤單，先用官方範例離線驗證
-- [ ] 6.3 風控層：每日虧損上限、一鍵停止、單筆下單金額上限，下單前的檢查閘門
+- [x] 6.2 Testnet REST client＋下單簽名：`BinanceTestnetClient` 完全沒有 `base_url` 欄位，
+      編譯期就不可能指向正式環境；簽名過的市價單下單＋查詢訂單狀態＋撤單都走同一個
+      `signed_url()` 入口；New Order（RESULT／FULL）、Query Order、Cancel Order 四個官方範例
+      全部離線驗證過（Query Order 範例原本有欄位被改過，已修正成逐字複製版本）
+- [x] 6.3 風控層：新 crate `at-risk-control`，每日虧損上限（`DailyPnl` 按 UTC 日界自動歸零）、
+      一鍵熔斷（`kill_switch`，連平倉單都擋，無例外）、單筆下單金額上限，下單前的檢查閘門
+      （`RiskLimits::check`）；只有「增加曝險」的單才受虧損上限約束，過零（多翻空／空翻多）
+      一律視為增加曝險；所有算術用 `checked_*`，資料缺失時 fail closed（擋單而非放行）
 - [ ] 6.4 把策略執行接上測試網下單：送單→等回報→更新帳本，不是模擬成交
 - [ ] 6.5 桌面 App「測試網交易」頁面＋風控設定
 - [ ] 6.6 真實測試網端到端驗證（需要使用者提供的測試網 API 金鑰）
