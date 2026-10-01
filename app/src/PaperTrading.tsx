@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -6,7 +6,7 @@ import type { StrategyConfig, StrategyInfo } from "./strategyTypes";
 import type {
   PaperSnapshot,
   PaperTradingStatus,
-  PaperUpdateEvent,
+  PaperUpdateEnvelope,
   StartPaperTradingRequest,
 } from "./paperTradingTypes";
 import { PAPER_TRADING_EVENT } from "./paperTradingTypes";
@@ -19,6 +19,11 @@ interface PaperTradingProps {
 }
 
 type Phase = "idle" | "running" | "stopped" | "failed";
+
+// 畫面本身只看「現在這一場」（多場並行監控是 Phase D 之後的總覽頁要做的
+// 事），但 command 介面改成多 session 之後每個 command 都要帶 sessionId；
+// 存進 localStorage 讓重新整理/切回這一頁時還能查到同一場的狀態。
+const SESSION_ID_STORAGE_KEY = "paperTrading.sessionId";
 
 function symbolError(raw: string): string | null {
   return raw.trim() === "" ? "請輸入交易對代號" : null;
@@ -43,6 +48,14 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
   const [startingCapital, setStartingCapital] = useState("10000");
   const [submitted, setSubmitted] = useState(false);
 
+  const [sessionId, setSessionId] = useState<string | null>(() =>
+    localStorage.getItem(SESSION_ID_STORAGE_KEY),
+  );
+  const sessionIdRef = useRef(sessionId);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
   const [phase, setPhase] = useState<Phase>("idle");
   const [curve, setCurve] = useState<PaperSnapshot[]>([]);
   const [latest, setLatest] = useState<PaperSnapshot | null>(null);
@@ -61,10 +74,11 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
   }, []);
 
   // 頁面掛載/切回來時，補上最後已知狀態，不用等下一個事件才有東西可看。
-  // latest_snapshot() 只有「目前狀態」、沒有完整曲線歷史，所以這裡最多只能補回一個點，
-  // 曲線會從這一點開始往後累積。
+  // 沒有記得過任何 sessionId（從來沒開始過，或那場已經停止離開了
+  // registry）時 command 會直接回 idle，不需要特判。
   useEffect(() => {
-    invoke<PaperTradingStatus>("paper_trading_status")
+    if (!sessionId) return;
+    invoke<PaperTradingStatus>("paper_trading_status", { sessionId })
       .then((status) => {
         if (status.status === "idle") return;
         setPhase(status.status);
@@ -77,11 +91,15 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
         }
       })
       .catch((err: unknown) => setStatusError(String(err)));
+    // 只在掛載時查一次，sessionId 變動（開始新的一場）不需要重查：
+    // start_paper_trading 本身已經把畫面狀態設成 running。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    const unlistenPromise = listen<PaperUpdateEvent>(PAPER_TRADING_EVENT, (event) => {
+    const unlistenPromise = listen<PaperUpdateEnvelope>(PAPER_TRADING_EVENT, (event) => {
       const payload = event.payload;
+      if (payload.sessionId !== sessionIdRef.current) return;
       if (payload.type === "bar") {
         setLatest(payload.snapshot);
         setCurve((prev) => [...prev, payload.snapshot]);
@@ -130,7 +148,9 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
     setLatest(null);
     setFailedMessage(null);
     try {
-      await invoke("start_paper_trading", { request });
+      const newSessionId = await invoke<string>("start_paper_trading", { request });
+      localStorage.setItem(SESSION_ID_STORAGE_KEY, newSessionId);
+      setSessionId(newSessionId);
       setPhase("running");
     } catch (err) {
       setStartError(String(err));
@@ -140,10 +160,11 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
   }
 
   async function handleStop() {
+    if (!sessionId) return;
     setStopping(true);
     setStopError(null);
     try {
-      await invoke("stop_paper_trading");
+      await invoke("stop_paper_trading", { sessionId });
     } catch (err) {
       setStopError(String(err));
     } finally {

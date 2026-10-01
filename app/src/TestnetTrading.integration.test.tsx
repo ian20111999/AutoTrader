@@ -26,8 +26,11 @@ const STRATEGIES = [
   },
 ];
 
+const SESSION_ID = "testnet-1000-001";
+
 afterEach(() => {
   clearMocks();
+  localStorage.clear();
 });
 
 describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底層 IPC）", () => {
@@ -44,6 +47,7 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
           case "testnet_trading_status":
             return { status: "idle" };
           case "start_testnet_trading":
+            return SESSION_ID;
           case "stop_testnet_trading":
           case "set_testnet_kill_switch":
             return null;
@@ -74,6 +78,7 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
     expect(await screen.findByText("測試網交易執行中，會真的對測試網送出訂單。")).toBeInTheDocument();
 
     await emit("testnet-trading-update", {
+      sessionId: SESSION_ID,
       type: "order",
       outcome: {
         type: "filled",
@@ -89,6 +94,7 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
     await screen.findByText(/送出 買進 0.01，成交 0.01（FILLED），手續費 0.5/);
 
     await emit("testnet-trading-update", {
+      sessionId: SESSION_ID,
       type: "bar",
       snapshot: {
         openTime: 1_704_067_200_000,
@@ -109,11 +115,17 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
     fireEvent.click(screen.getByRole("button", { name: "一鍵停止送單" }));
     await waitFor(() =>
       expect(
-        calls.some((c) => c.cmd === "set_testnet_kill_switch" && (c.payload as { on: boolean }).on),
+        calls.some(
+          (c) =>
+            c.cmd === "set_testnet_kill_switch" &&
+            (c.payload as { sessionId: string; on: boolean }).sessionId === SESSION_ID &&
+            (c.payload as { sessionId: string; on: boolean }).on,
+        ),
       ).toBe(true),
     );
 
     await emit("testnet-trading-update", {
+      sessionId: SESSION_ID,
       type: "bar",
       snapshot: {
         openTime: 1_704_067_260_000,
@@ -131,8 +143,11 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
 
     fireEvent.click(screen.getByRole("button", { name: "停止測試網交易" }));
     await waitFor(() => expect(calls.some((c) => c.cmd === "stop_testnet_trading")).toBe(true));
+    expect(calls.find((c) => c.cmd === "stop_testnet_trading")?.payload).toEqual({
+      sessionId: SESSION_ID,
+    });
 
-    await emit("testnet-trading-update", { type: "stopped" });
+    await emit("testnet-trading-update", { sessionId: SESSION_ID, type: "stopped" });
 
     const status = await screen.findByText("已停止測試網交易。");
     expect(status).toHaveAttribute("role", "status");
@@ -150,7 +165,7 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
           case "testnet_trading_status":
             return { status: "idle" };
           case "start_testnet_trading":
-            return null;
+            return SESSION_ID;
           default:
             throw new Error(`unexpected command: ${cmd}`);
         }
@@ -163,6 +178,7 @@ describe("TestnetTrading 整合測試（真正的 invoke/listen/emit，只換底
     await screen.findByText("測試網交易執行中，會真的對測試網送出訂單。");
 
     await emit("testnet-trading-update", {
+      sessionId: SESSION_ID,
       type: "failed",
       message: "送單失敗：HTTP 狀態碼 418。訂單可能已經送達交易所，請到測試網後台確認實際部位",
     });

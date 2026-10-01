@@ -45,6 +45,10 @@ export type TestnetUpdateEvent =
   | { type: "stopped" }
   | { type: "failed"; message: string };
 
+// Rust 端的事件 payload 外層多包一個 sessionId（#[serde(flatten)]），
+// 前端用它過濾只處理自己這場 session 的事件（ADR-001 §7.3）。
+export type TestnetUpdateEnvelope = TestnetUpdateEvent & { sessionId: string };
+
 export type TestnetTradingStatus =
   | { status: "idle" }
   | { status: "running"; snapshot: TestnetSnapshot | null }

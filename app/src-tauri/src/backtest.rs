@@ -20,9 +20,20 @@ use at_core::{
 };
 use at_downloader::{download_and_store_monthly_klines, local_path};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use tauri::Manager;
+
+/// 回測不進 session registry（ADR §4.5：它是同步的，沒有 handle、沒有
+/// stop），所以用自己的一個計數器產生 id，不走 `SessionRegistry::generate_id`。
+static BACKTEST_SESSION_SEQ: AtomicU32 = AtomicU32::new(0);
+
+fn generate_backtest_session_id() -> String {
+    let seq = BACKTEST_SESSION_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("backtest-{}-{seq:03}", crate::session_registry::now_ms())
+}
 
 /// 這一步的預設成本假設：Binance 現貨 VIP0（吃單 0.1%）+ 0.05% 滑價。
 /// 沒有槓桿（strategies 目前全部只做多/空手），所以強制平倉、資金費用不到，
@@ -163,7 +174,7 @@ pub(crate) fn build_strategy(
 
 /// 用策略 id 找內建清單裡的顯示名稱，跟 3.2 的 `strategies::builtin_strategies`
 /// 共用同一份名稱，不在這裡另外寫一份中文字串。
-fn strategy_display_name(strategy_id: &str) -> Result<String, String> {
+pub(crate) fn strategy_display_name(strategy_id: &str) -> Result<String, String> {
     crate::strategies::builtin_strategies()
         .into_iter()
         .find(|info| info.id == strategy_id)
@@ -184,6 +195,7 @@ pub struct EquityPointDto {
 #[derive(Serialize, Clone, PartialEq, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct BacktestSummary {
+    pub session_id: String,
     pub symbol: String,
     pub interval: String,
     pub year: u32,
@@ -226,6 +238,7 @@ pub struct BacktestSummary {
 /// ——BTC 買入持有基準固定是現貨/只做多/1 倍槓桿，不需要走一次市場驗證。
 #[allow(clippy::too_many_arguments)]
 fn summarize_with_strategy(
+    session_id: &str,
     bars: &[Bar],
     symbol: &str,
     interval: &str,
@@ -264,6 +277,7 @@ fn summarize_with_strategy(
     let metrics = Metrics::from_curve(&result.curve);
 
     Ok(BacktestSummary {
+        session_id: session_id.to_string(),
         symbol: symbol.to_string(),
         interval: interval.to_string(),
         year,
@@ -346,7 +360,9 @@ fn summarize(
         Market::UsdmPerp => Some(at_core::DEFAULT_MAINTENANCE_MARGIN_RATE),
     };
 
+    let session_id = generate_backtest_session_id();
     summarize_with_strategy(
+        &session_id,
         bars,
         &request.symbol,
         &request.interval,
@@ -366,6 +382,58 @@ fn summarize(
         &leverage.to_string(),
         margin_mode.map(|m| m.label_zh()),
     )
+}
+
+/// 把一筆成功的回測寫進 session store（ADR §6.4：每場都自動留紀錄，使用者
+/// 另外按「儲存回測」才把 `saved` 翻成 `true`）。寫入失敗不擋回測結果顯示——
+/// 使用者已經等到這個結果了，不該因為歷史紀錄寫不進去就整個失敗。
+fn record_backtest_session(store: &at_session_store::SessionStore, summary: &BacktestSummary) {
+    let params: BTreeMap<String, String> = summary.params.clone().into_iter().collect();
+    let record = at_session_store::SessionRecord {
+        schema_version: at_session_store::CURRENT_SCHEMA_VERSION,
+        id: summary.session_id.clone(),
+        kind: at_core::RunMode::Backtest,
+        market: match summary.market.as_str() {
+            "usdm_perp" => Market::UsdmPerp,
+            _ => Market::Spot,
+        },
+        symbol: summary.symbol.clone(),
+        interval: summary.interval.clone(),
+        strategy_id: summary.strategy_id.clone(),
+        strategy_name: summary.strategy_name.clone(),
+        params,
+        started_at_ms: crate::session_registry::now_ms(),
+        ended_at_ms: Some(crate::session_registry::now_ms()),
+        status: at_session_store::SessionStatus::Completed,
+        status_message: None,
+        starting_capital: summary.starting_capital.clone(),
+        final_equity: summary.curve.last().map(|p| p.equity.clone()),
+        bars_seen: summary.bar_count as u64,
+        metrics: Some(at_session_store::SessionMetrics {
+            total_return: summary.total_return.clone(),
+            annualized_return: summary.annualized_return.clone(),
+            max_drawdown: Some(summary.max_drawdown.clone()),
+            sharpe: summary.sharpe.clone(),
+            span_years: summary.span_years.clone(),
+        }),
+        counters: at_session_store::SessionCounters {
+            trades: Some(summary.trades as u64),
+            liquidations: Some(summary.liquidations as u64),
+            ..Default::default()
+        },
+        cost_assumptions: at_session_store::CostAssumptions {
+            fee_model: Some(summary.fee_model.clone()),
+            slippage: Some(summary.slippage.clone()),
+            funding_rate: Some("0".to_string()),
+            maintenance_margin_rate: None,
+        },
+        saved: false,
+        data_source_path: Some(summary.data_source_path.clone()),
+        notes: None,
+    };
+    if let Err(e) = store.upsert_session(record) {
+        eprintln!("寫入回測紀錄失敗：{e}");
+    }
 }
 
 /// 永遠全倉做多，不需要暖機、不需要參數。只給 3.7 比較頁內部用來跑「BTC 買入
@@ -418,7 +486,13 @@ pub async fn run_buy_hold_baseline_command(
         load_bars(base_dir, symbol, interval, request.year, request.month).await?;
 
     let mut strategy = BuyAndHold;
+    // 基準策略刻意不寫進 session store：它不是使用者自己跑的回測，不該出現
+    // 在「最近回測清單」「回測次數」裡（strategy_id 查表一節的理由同一個：
+    // 不讓它出現在使用者看得到的策略庫）。id 只是為了跟 BacktestSummary
+    // 其他欄位一樣有個值可以回顯，前端用 strategy_id 判斷不是真正的回測。
+    let session_id = generate_backtest_session_id();
     summarize_with_strategy(
+        &session_id,
         &bars,
         "BTCUSDT",
         &request.interval,
@@ -484,7 +558,10 @@ pub async fn run_backtest_command(
     let (bars, data_source_path) =
         load_bars(base_dir, symbol, interval, request.year, request.month).await?;
 
-    summarize(&bars, &request, &data_source_path)
+    let summary = summarize(&bars, &request, &data_source_path)?;
+    let store = app.state::<Arc<at_session_store::SessionStore>>();
+    record_backtest_session(&store, &summary);
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -873,6 +950,7 @@ mod tests {
 
         let mut baseline_strategy = BuyAndHold;
         let summary = summarize_with_strategy(
+            "test-session-id",
             &bars,
             "BTCUSDT",
             "1h",

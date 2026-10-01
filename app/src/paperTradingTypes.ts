@@ -26,6 +26,10 @@ export type PaperUpdateEvent =
   | { type: "stopped" }
   | { type: "failed"; message: string };
 
+// Rust 端的事件 payload 外層多包一個 sessionId（#[serde(flatten)]），
+// 前端用它過濾只處理自己這場 session 的事件（ADR-001 §7.3）。
+export type PaperUpdateEnvelope = PaperUpdateEvent & { sessionId: string };
+
 export type PaperTradingStatus =
   | { status: "idle" }
   | { status: "running"; snapshot: PaperSnapshot | null }

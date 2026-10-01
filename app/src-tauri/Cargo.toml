@@ -36,6 +36,7 @@ at-binance = { path = "../../crates/binance-client" }
 at-account-sync = { path = "../../crates/account-sync" }
 at-risk-control = { path = "../../crates/risk-control" }
 at-testnet-trading = { path = "../../crates/testnet-trading" }
+at-session-store = { path = "../../crates/session-store" }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

@@ -30,8 +30,11 @@ const STRATEGIES = [
   },
 ];
 
+const SESSION_ID = "paper-1000-001";
+
 afterEach(() => {
   clearMocks();
+  localStorage.clear();
 });
 
 describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底層 IPC）", () => {
@@ -46,6 +49,7 @@ describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底�
           case "paper_trading_status":
             return { status: "idle" };
           case "start_paper_trading":
+            return SESSION_ID;
           case "stop_paper_trading":
             return null;
           default:
@@ -72,6 +76,7 @@ describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底�
     expect(await screen.findByRole("status")).toHaveTextContent("模擬交易執行中");
 
     await emit("paper-trading-update", {
+      sessionId: SESSION_ID,
       type: "bar",
       snapshot: {
         openTime: 1_704_067_200_000,
@@ -89,8 +94,11 @@ describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底�
 
     fireEvent.click(screen.getByRole("button", { name: "停止模擬" }));
     await waitFor(() => expect(calls.some((c) => c.cmd === "stop_paper_trading")).toBe(true));
+    expect(calls.find((c) => c.cmd === "stop_paper_trading")?.payload).toEqual({
+      sessionId: SESSION_ID,
+    });
 
-    await emit("paper-trading-update", { type: "stopped" });
+    await emit("paper-trading-update", { sessionId: SESSION_ID, type: "stopped" });
 
     const status = await screen.findByText("已停止模擬交易。");
     expect(status).toHaveAttribute("role", "status");
@@ -106,7 +114,7 @@ describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底�
           case "paper_trading_status":
             return { status: "idle" };
           case "start_paper_trading":
-            return null;
+            return SESSION_ID;
           default:
             throw new Error(`unexpected command: ${cmd}`);
         }
@@ -119,6 +127,7 @@ describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底�
     await screen.findByRole("status");
 
     await emit("paper-trading-update", {
+      sessionId: SESSION_ID,
       type: "failed",
       message: "第 3 根 K 線的權益變成負數",
     });

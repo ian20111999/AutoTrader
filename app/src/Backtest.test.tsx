@@ -27,6 +27,7 @@ const STRATEGY_CONFIG: StrategyConfig = {
 
 function summaryFor(symbol: string): BacktestSummary {
   return {
+    sessionId: `backtest-test-${symbol}`,
     symbol,
     interval: "1d",
     year: 2024,

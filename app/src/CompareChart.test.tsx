@@ -6,6 +6,7 @@ import type { BacktestSummary } from "./backtestTypes";
 
 function run(overrides: Partial<BacktestSummary> = {}): BacktestSummary {
   return {
+    sessionId: "backtest-test-1",
     symbol: "BTCUSDT",
     interval: "1d",
     year: 2024,

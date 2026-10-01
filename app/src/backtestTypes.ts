@@ -37,6 +37,7 @@ export interface BacktestRequest {
 }
 
 export interface BacktestSummary {
+  sessionId: string;
   symbol: string;
   interval: string;
   year: number;
