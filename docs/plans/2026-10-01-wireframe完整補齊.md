@@ -126,18 +126,23 @@ AND/OR）。現有引擎的策略是 4 個寫死的 Rust 實作，只能調數�
 
 ## 進度
 
-- [ ] Phase A1 回測槓桿/方向/保證金/多幣種
-- [ ] Phase A2 比較頁強化
-- [ ] Phase A3 設定頁強化
-- [ ] Phase A4 SideNav 補齊
-- [ ] Phase B 設計（architecture）
-- [ ] Phase B 實作
-- [ ] Phase C 總覽頁面
+- [x] Phase A1 回測槓桿/方向/保證金/多幣種
+- [x] Phase A2 比較頁強化
+- [x] Phase A3 設定頁強化
+- [x] Phase A4 SideNav 補齊
+- [x] Phase B 設計（architecture，ADR-001 session-registry）
+- [x] Phase B 實作（B1 at-session-store crate、B2 session registry 多 session）
+- [x] Phase C 總覽頁面
 - [ ] Phase D 模擬交易多策略並行
-- [ ] Phase E 設計（architecture）
-- [ ] Phase E 實作
-- [ ] Phase F 設計（architecture，策略 DSL ADR）
-- [ ] Phase F Rust 執行引擎
-- [ ] Phase F 積木 UI
-- [ ] Phase G 回測進階功能
-- [ ] Phase H 策略庫 UI 強化
+- [x] Phase E 設計（architecture，ADR-002 portfolio-risk-engine）
+- [x] Phase E1 實作（at-portfolio-risk crate：熔斷規則引擎，已修復 fail-open-state-drift）
+- [ ] Phase E2 實作（獨立風控頁 UI + 把熔斷器接進 testnet-trading 實際送單路徑）
+- [x] Phase F 設計（architecture，ADR-003 strategy-dsl）
+- [x] Phase F1 Rust 執行引擎（strategy_dsl crate）
+- [x] Phase F2 Tauri 橋接（build_custom_strategy、validate_strategy_ast）
+- [ ] Phase F3 積木 UI
+- [x] Phase G 回測進階功能
+- [x] Phase H 策略庫 UI 強化
+
+剩餘：Phase D、Phase E2、Phase F3。其餘皆已 merge 進 main 並 push
+（最新：`5c53791`）。
