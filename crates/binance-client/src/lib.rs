@@ -18,6 +18,7 @@
 //!   簽名過的 query string）。
 //! - [`sign`] 只回傳簽名結果本身；呼叫端要自行負責不要把回傳值印出來。
 
+pub mod market_data;
 pub mod testnet;
 
 use at_secrets::{CredentialStore, KeychainStore, SecretError, SecretValue};

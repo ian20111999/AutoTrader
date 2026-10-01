@@ -232,7 +232,22 @@ pub fn start_paper_trading(
     // 在 spawn_paper 之前先拿一份：這樣即使 spawn_paper 失敗，也還握著能叫停
     // 這條已經連上的行情連線的旗標（見模組文件）。
     let stop_flag = stream.stop_flag();
-    let paper = match spawn_paper(stream, strategy, &config) {
+
+    // 先讓行情連線開始把 K 線排進 channel，再去抓暖機用的歷史：抓歷史的那幾百
+    // 毫秒內剛收盤的 K 線不會漏掉（重複的部分由 at-paper-trading 的暖機水位線
+    // 擋掉）。抓不到就連行情一起收工，不留孤兒連線，也不默默冷啟動。
+    // `validate_request` 已經驗過並正規化成大寫，這裡只是把字串換回 `Symbol`
+    // 型別（不另外 unwrap：這條路不該有 panic 的機會）。
+    let symbol_for_warmup = Symbol::new(&symbol).map_err(|e| format!("交易對代號不合法：{e}"))?;
+    let warmup = match crate::warmup::fetch(&symbol_for_warmup, interval, strategy.as_ref()) {
+        Ok(warmup) => warmup,
+        Err(message) => {
+            stop_flag.store(true, Ordering::Relaxed);
+            return Err(message);
+        }
+    };
+
+    let paper = match spawn_paper(stream, strategy, &config, &warmup) {
         Ok(paper) => paper,
         Err(error) => {
             stop_flag.store(true, Ordering::Relaxed);
@@ -508,7 +523,11 @@ mod tests {
 
         let stream = at_market_stream::spawn(at_market_stream::kline_stream(&symbol, interval));
         let stop_flag = stream.stop_flag();
-        let paper = spawn_paper(stream, strategy, &config).expect("設定應該合法");
+        // 刻意**不**暖機：這一條驗的是這個檔案的橋接邏輯（驗證、DTO 轉換、
+        // 狀態機），下面那句「暖機中、空手，權益不該變」要的就是冷啟動的策略。
+        // 暖機本身由 `at-paper-trading` 與 `crate::warmup` 的測試負責。
+        let paper = spawn_paper(stream, strategy, &config, &at_core::WarmupBars::none())
+            .expect("設定應該合法");
 
         let mut inner = Inner {
             state: RunState::Running,

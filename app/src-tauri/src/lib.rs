@@ -5,6 +5,7 @@ mod settings;
 mod strategies;
 mod testnet_settings;
 mod testnet_trading;
+mod warmup;
 
 use account_permissions::check_account_permissions;
 use backtest::{run_backtest_command, run_buy_hold_baseline_command};

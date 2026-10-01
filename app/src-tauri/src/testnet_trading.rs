@@ -375,7 +375,20 @@ pub fn start_testnet_trading(
     // 在 spawn_testnet 之前先拿一份：spawn_testnet 失敗時還能叫停已經連上
     // 的行情連線（理由同 `paper_trading.rs`）。
     let stop_flag = stream.stop_flag();
-    let handle = match spawn_testnet(stream, client, strategy, &config) {
+
+    // 先讓行情連線開始把 K 線排進 channel，再抓暖機用的歷史 K 線：抓歷史的那
+    // 幾百毫秒內剛收盤的 K 線不會漏掉（重複的部分由 at-testnet-trading 的暖機
+    // 水位線擋掉）。抓不到就擋下啟動——這裡會真的送單，用沒收斂的指標交易等於
+    // 拿一套沒驗證過的訊號下單（理由見 `warmup.rs`）。
+    let warmup = match crate::warmup::fetch(&symbol, interval, strategy.as_ref()) {
+        Ok(warmup) => warmup,
+        Err(message) => {
+            stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            return Err(message);
+        }
+    };
+
+    let handle = match spawn_testnet(stream, client, strategy, &config, &warmup) {
         Ok(handle) => handle,
         Err(error) => {
             stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);

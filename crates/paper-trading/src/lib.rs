@@ -23,6 +23,29 @@
 //! 這裡只讀公開行情、只呼叫記帳引擎，沒有引入 `at-binance`，也沒有任何下單
 //! 程式碼路徑可以走到（專案第 6 步之前的硬性規定）。
 //!
+//! # 開始交易之前先暖機回放
+//!
+//! 即時行情是「現在開始」，但策略的指標需要一段歷史才有意義
+//! （[`Strategy::warmup_bars`]）。所以 [`spawn`] 的第一件事不是等 K 線，而是把
+//! 呼叫端給的 [`WarmupBars`] 依序餵給策略、**丟棄這段期間產生的目標部位**，
+//! 讓指標的內部狀態（均線的視窗、RSI 的平滑累加值）先收斂，然後才接即時行情。
+//!
+//! 回放**不經過 [`PaperEngine`]**：`WarmupBars::replay` 只拿得到策略本身，
+//! 所以回放期間不可能記帳、不可能產生權益點、也不可能有送單路徑
+//! （這個 crate 本來就沒有送單路徑）。
+//!
+//! 回放完會記下最後一根的開盤時間當分水嶺：即時行情裡開盤時間**小於或等於**
+//! 它的收盤 K 線一律跳過。這不是最佳化，是必要的——抓歷史要花幾百毫秒，
+//! 這段時間 WebSocket 可能已經把同一根 K 線排進 channel 了，再餵一次會違反
+//! 「每根只餵一次」的契約，而且 [`PaperEngine::on_bar`] 會直接回
+//! [`BacktestError::NonMonotonicTime`] 讓整個 session 當場死掉。
+//!
+//! 歷史 K 線從哪裡來、抓不到要怎麼辦，刻意**不在這個 crate**：
+//! 用 `at_binance::market_data::recent_closed_bars` 抓，由啟動 session 的那一層
+//! 決定失敗時要不要擋下啟動。這樣這個 crate 不必為了暖機而依賴 `at-binance`，
+//! 上面「沒有任何送單路徑」那一段才繼續成立——模擬交易的依賴圖裡連
+//! `place_market_order` 都不存在。
+//!
 //! # 開始與停止（5.3）
 //!
 //! [`spawn`] 就是「開始」。停止是 [`PaperTradingHandle::stop`]：它設定的是
@@ -37,15 +60,24 @@
 //! # 用起來像這樣
 //!
 //! ```no_run
-//! use at_core::{BacktestConfig, Fixed, SmaCross};
+//! use at_core::{warmup_fetch_count, BacktestConfig, Fixed, SmaCross, Strategy, WarmupBars};
 //! use at_market_stream::{kline_stream, spawn as spawn_stream};
 //! use at_paper_trading::{spawn, PaperUpdate};
 //! use at_core::Interval;
 //!
 //! let config = BacktestConfig::frictionless(Fixed::from_int(10_000).unwrap());
 //! let strategy = SmaCross::new(10, 30).unwrap();
+//!
+//! // 暖機用的歷史 K 線要抓幾根：策略宣告的需求 × 安全係數。
+//! let need = warmup_fetch_count(&strategy);
+//! assert_eq!(need, 150);
+//! // 真的去抓是啟動 session 那一層的事（App 用
+//! // `at_binance::market_data::recent_closed_bars(&symbol, interval, need)`），
+//! // 抓不到就不要開始：冷啟動的訊號和回測不一樣。這裡用空的示意。
+//! let warmup = WarmupBars::none();
+//!
 //! let stream = spawn_stream(kline_stream("BTCUSDT", Interval::M1));
-//! let paper = spawn(stream, Box::new(strategy), &config).unwrap();
+//! let paper = spawn(stream, Box::new(strategy), &config, &warmup).unwrap();
 //!
 //! // 使用者按下「停止」時呼叫 paper.stop()；隨時可以問目前部位與權益：
 //! if let Some(now) = paper.latest_snapshot() {
@@ -68,7 +100,7 @@
 //! ```
 
 use at_core::backtest::PaperEngine;
-use at_core::{BacktestConfig, BacktestError, EquityPoint, Fixed, Strategy};
+use at_core::{BacktestConfig, BacktestError, EquityPoint, Fixed, Strategy, WarmupBars};
 use at_market_stream::{MarketEvent, MarketStreamHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -151,6 +183,10 @@ impl PaperTradingHandle {
 
 /// 把一條即時行情串流接上一個新的模擬交易引擎，回傳控制代碼。
 ///
+/// `warmup` 是開始處理即時行情**之前**要先餵給策略的歷史 K 線（見 crate 文件的
+/// 「開始交易之前先暖機回放」）。沒有歷史資料可用時傳 [`WarmupBars::none`]，
+/// 那就是明確選擇冷啟動：策略從第一根即時 K 線開始看，指標收斂之前照契約空手。
+///
 /// 設定有問題（起始資金、滑價、費率、資金費、維持保證金率）會**當場**回錯誤，
 /// 不會開執行緒、也不會等到第一根 K 線才發現參數是錯的。
 ///
@@ -162,9 +198,10 @@ pub fn spawn(
     stream: MarketStreamHandle,
     strategy: Box<dyn Strategy + Send>,
     config: &BacktestConfig,
+    warmup: &WarmupBars,
 ) -> Result<PaperTradingHandle, BacktestError> {
     let stop = stream.stop_flag();
-    spawn_with(stream.events, stop, strategy, config)
+    spawn_with(stream.events, stop, strategy, config, warmup)
 }
 
 /// [`spawn`] 的本體，只要「事件從哪來」和「停止旗標」兩樣東西。
@@ -176,8 +213,14 @@ fn spawn_with(
     stop: Arc<AtomicBool>,
     mut strategy: Box<dyn Strategy + Send>,
     config: &BacktestConfig,
+    warmup: &WarmupBars,
 ) -> Result<PaperTradingHandle, BacktestError> {
     let mut engine = PaperEngine::new(config)?;
+    // 先驗設定再回放：設定是錯的就不該白跑一遍暖機。
+    //
+    // 回放在這裡（開執行緒之前）同步做完，所以「回放結束才開始處理即時行情」
+    // 不是靠執行順序的巧合，而是結構上的先後。幾百根 on_bar 是微秒級的工作。
+    let replayed_through = warmup.replay(strategy.as_mut());
     let latest = Arc::new(Mutex::new(None));
     let (tx, rx) = mpsc::channel();
     let worker_latest = Arc::clone(&latest);
@@ -190,6 +233,7 @@ fn spawn_with(
             &tx,
             &worker_latest,
             &worker_stop,
+            replayed_through,
         );
     });
     Ok(PaperTradingHandle {
@@ -216,6 +260,9 @@ fn spawn_with(
 ///
 /// 網路不在這裡，所以測試可以直接在當前執行緒呼叫它，用一般的 channel 塞測資
 /// 進去。
+///
+/// `replayed_through` 是暖機回放最後一根的開盤時間（沒回放過是 `None`）：
+/// 開盤時間小於或等於它的收盤 K 線已經算在策略的狀態裡了，必須跳過。
 fn run(
     events: &mpsc::Receiver<MarketEvent>,
     engine: &mut PaperEngine,
@@ -223,6 +270,7 @@ fn run(
     updates: &mpsc::Sender<PaperUpdate>,
     latest: &Mutex<Option<PaperSnapshot>>,
     stop: &AtomicBool,
+    replayed_through: Option<i64>,
 ) {
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -240,6 +288,12 @@ fn run(
             continue;
         };
         if !update.is_closed {
+            continue;
+        }
+        // 暖機回放已經餵過的那幾根：抓歷史要花幾百毫秒，這段時間 WebSocket
+        // 可能已經把同一根排進 channel 了。再餵一次會違反「每根只餵一次」，
+        // 而且引擎會回 NonMonotonicTime 讓整個 session 當場死掉。
+        if replayed_through.is_some_and(|through| update.bar.open_time <= through) {
             continue;
         }
         match engine.on_bar(&update.bar, strategy) {
@@ -273,7 +327,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use at_core::{Bar, Interval, Symbol, TargetPosition};
+    use at_core::{warmup_fetch_count, Bar, Interval, SmaCross, Symbol, TargetPosition};
     use at_market_stream::KlineUpdate;
 
     fn fx(s: &str) -> Fixed {
@@ -357,6 +411,7 @@ mod tests {
             &update_tx,
             &latest,
             &AtomicBool::new(false),
+            None,
         );
         drop(update_tx);
         let snapshot = latest.into_inner().expect("測試裡的鎖不會被下毒");
@@ -373,11 +428,71 @@ mod tests {
         Arc<AtomicBool>,
         PaperTradingHandle,
     ) {
+        fake_stream_handle_warmed(strategy, &WarmupBars::none())
+    }
+
+    /// 同上，但先暖機回放一段歷史 K 線。走的是真正的 [`spawn_with`]，所以
+    /// 「回放在哪裡發生、水位線怎麼傳下去」都是被測到的，不是測試自己模擬的。
+    fn fake_stream_handle_warmed(
+        strategy: Box<dyn Strategy + Send>,
+        warmup: &WarmupBars,
+    ) -> (
+        mpsc::Sender<MarketEvent>,
+        Arc<AtomicBool>,
+        PaperTradingHandle,
+    ) {
         let (event_tx, event_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
-        let paper = spawn_with(event_rx, Arc::clone(&stop), strategy, &frictionless())
-            .expect("設定應該合法");
+        let paper = spawn_with(
+            event_rx,
+            Arc::clone(&stop),
+            strategy,
+            &frictionless(),
+            warmup,
+        )
+        .expect("設定應該合法");
         (event_tx, stop, paper)
+    }
+
+    /// 和 [`Recorder`] 一樣記下看過哪幾根，但狀態放在 [`Arc`] 裡：策略被搬進
+    /// 背景執行緒之後，測試還要看得到它到底被餵了什麼。
+    struct SharedRecorder {
+        want: TargetPosition,
+        seen: Arc<Mutex<Vec<i64>>>,
+    }
+
+    impl Strategy for SharedRecorder {
+        fn on_bar(&mut self, bar: &Bar) -> TargetPosition {
+            self.seen
+                .lock()
+                .expect("測試裡的鎖不會被下毒")
+                .push(bar.open_time);
+            self.want
+        }
+    }
+
+    /// 開一個暖機過的 handle，順便拿到「策略看過哪幾根」。
+    #[allow(clippy::type_complexity)]
+    fn warmed_handle(
+        want: TargetPosition,
+        warmup: &WarmupBars,
+    ) -> (
+        mpsc::Sender<MarketEvent>,
+        Arc<Mutex<Vec<i64>>>,
+        PaperTradingHandle,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let strategy = SharedRecorder {
+            want,
+            seen: Arc::clone(&seen),
+        };
+        let (events, _stop, paper) = fake_stream_handle_warmed(Box::new(strategy), warmup);
+        (events, seen, paper)
+    }
+
+    fn warmup_of(indexes: &[i64]) -> WarmupBars {
+        let bars: Vec<Bar> = indexes.iter().map(|i| bar(*i, "100")).collect();
+        WarmupBars::new(bars, Interval::M1).expect("測試的暖機資料應該合法")
     }
 
     // ---- 過濾：只有收盤 K 線才餵進引擎 ----
@@ -609,6 +724,171 @@ mod tests {
         );
     }
 
+    // ---- 暖機回放 ----
+
+    #[test]
+    fn the_warmup_replay_never_touches_the_ledger() {
+        // 策略每一根都要求滿倉做多。如果回放有經過引擎，帳本就會有成交、
+        // 有權益點、有「目前狀態」——這個測試會抓到。
+        let (_events, seen, paper) =
+            warmed_handle(TargetPosition::FULL_LONG, &warmup_of(&[0, 1, 2]));
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![T0, T0 + MINUTE_MS, T0 + 2 * MINUTE_MS],
+            "spawn 回來的時候三根歷史 K 線應該已經餵完了（回放是同步做的）"
+        );
+        assert_eq!(
+            paper.latest_snapshot(),
+            None,
+            "回放不進帳本：回放完還是沒有任何「目前狀態」可查"
+        );
+        assert_eq!(
+            paper.updates.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "回放期間不可以送出任何一則更新（包括權益點）"
+        );
+    }
+
+    #[test]
+    fn live_bars_are_only_processed_after_the_replay_finishes() {
+        let (events, seen, paper) = warmed_handle(TargetPosition::FLAT, &warmup_of(&[0, 1, 2]));
+
+        events
+            .send(kline(bar(3, "103"), true))
+            .expect("測試用的 channel 不該關閉");
+
+        match paper
+            .updates
+            .recv_timeout(Duration::from_secs(5))
+            .expect("第一根即時 K 線應該送出一則更新")
+        {
+            PaperUpdate::Bar(snapshot) => assert_eq!(
+                snapshot.point.open_time,
+                T0 + 3 * MINUTE_MS,
+                "第一個權益點必須是第一根**即時** K 線，不是回放的任何一根"
+            ),
+            other => panic!("不該收到 {other:?}"),
+        }
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![T0, T0 + MINUTE_MS, T0 + 2 * MINUTE_MS, T0 + 3 * MINUTE_MS],
+            "策略看到的順序是：回放的三根，然後才是即時那根"
+        );
+    }
+
+    #[test]
+    fn live_bars_already_covered_by_the_warmup_are_skipped() {
+        // 抓歷史要花幾百毫秒，這段時間 WebSocket 可能已經把同一根 K 線排進
+        // channel。沒有這個水位線，引擎會因為時間沒有遞增而回 NonMonotonicTime，
+        // 整個 session 在啟動的瞬間就死掉。
+        let (events, seen, paper) = warmed_handle(TargetPosition::FLAT, &warmup_of(&[0, 1, 2]));
+
+        for event in [
+            kline(bar(1, "101"), true), // 回放過了
+            kline(bar(2, "102"), true), // 回放過了（最後一根，邊界）
+            kline(bar(3, "103"), true), // 真的是新的
+        ] {
+            events.send(event).expect("測試用的 channel 不該關閉");
+        }
+
+        match paper
+            .updates
+            .recv_timeout(Duration::from_secs(5))
+            .expect("應該有一則更新")
+        {
+            PaperUpdate::Bar(snapshot) => assert_eq!(
+                snapshot.point.open_time,
+                T0 + 3 * MINUTE_MS,
+                "只有超過水位線的那根可以進帳本"
+            ),
+            other => panic!("重複的 K 線不該造成 {other:?}"),
+        }
+        assert_eq!(
+            paper.updates.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout),
+            "三根只有一根是新的，不該有第二則更新"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![T0, T0 + MINUTE_MS, T0 + 2 * MINUTE_MS, T0 + 3 * MINUTE_MS],
+            "回放過的 K 線不可以再餵一次（違反「每根只餵一次」的契約）"
+        );
+    }
+
+    #[test]
+    fn no_warmup_data_is_a_cold_start_not_a_failure() {
+        // 暖機資料不足到「完全沒有」時的行為：照舊從第一根即時 K 線開始，
+        // 和這個改動之前一模一樣。要不要因為抓不到歷史而擋下啟動，是啟動
+        // session 那一層的決定，不是這裡。
+        let (events, seen, paper) = warmed_handle(TargetPosition::FLAT, &WarmupBars::none());
+        assert_eq!(paper.latest_snapshot(), None);
+
+        events
+            .send(kline(bar(0, "100"), true))
+            .expect("測試用的 channel 不該關閉");
+        match paper
+            .updates
+            .recv_timeout(Duration::from_secs(5))
+            .expect("冷啟動也要能正常處理即時行情")
+        {
+            PaperUpdate::Bar(snapshot) => assert_eq!(snapshot.point.open_time, T0),
+            other => panic!("不該收到 {other:?}"),
+        }
+        assert_eq!(*seen.lock().unwrap(), vec![T0]);
+    }
+
+    #[test]
+    fn a_warmup_shorter_than_the_strategy_asks_for_still_replays_what_there_is() {
+        let strategy = SmaCross::new(10, 30).unwrap();
+        assert_eq!(warmup_fetch_count(&strategy), 150, "宣告需求 30 × 係數 5");
+
+        // 只拿到 2 根（例如新上市的交易對）：不是錯誤，有多少餵多少。
+        let (_events, seen, paper) = warmed_handle(TargetPosition::FLAT, &warmup_of(&[0, 1]));
+        assert_eq!(*seen.lock().unwrap(), vec![T0, T0 + MINUTE_MS]);
+        assert_eq!(paper.latest_snapshot(), None);
+    }
+
+    #[test]
+    fn a_warmed_strategy_signals_sooner_than_a_cold_one() {
+        // 這是整件事的重點：同樣的即時 K 線，暖機過的策略和冷啟動的策略
+        // 做出不同的決定。快線 2／慢線 3，暖機三根上漲的 K 線。
+        let warmup = {
+            let bars = vec![bar(0, "100"), bar(1, "101"), bar(2, "102")];
+            WarmupBars::new(bars, Interval::M1).expect("暖機資料應該合法")
+        };
+
+        let position_after = |warmup: &WarmupBars| -> Fixed {
+            let strategy = SmaCross::new(2, 3).expect("參數合法");
+            let (events, _stop, paper) = fake_stream_handle_warmed(Box::new(strategy), warmup);
+            for event in [kline(bar(3, "103"), true), kline(bar(4, "104"), true)] {
+                events.send(event).expect("測試用的 channel 不該關閉");
+            }
+            let mut last = None;
+            for _ in 0..2 {
+                match paper
+                    .updates
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("兩根即時 K 線應該送出兩則更新")
+                {
+                    PaperUpdate::Bar(snapshot) => last = Some(snapshot),
+                    other => panic!("不該收到 {other:?}"),
+                }
+            }
+            last.expect("應該有更新").position
+        };
+
+        assert!(
+            position_after(&warmup) > Fixed::ZERO,
+            "暖機過的均線交叉策略在第一根即時 K 線就該有訊號（下一根成交）"
+        );
+        assert_eq!(
+            position_after(&WarmupBars::none()),
+            Fixed::ZERO,
+            "冷啟動的同一個策略連均線都還算不出來，只能空手——這正是暖機要修的問題"
+        );
+    }
+
     // ---- 真實連線（需要網路，預設不跑）----
 
     /// 真的連上 Binance 的 1 分鐘 K 線串流，收到第一則收盤 K 線的更新之後，
@@ -626,6 +906,8 @@ mod tests {
             stream,
             Box::new(Recorder::default()),
             &BacktestConfig::frictionless(fx("10000")),
+            // 這條驗的是「真實行情接得上」，不是暖機；Recorder 不需要暖機。
+            &WarmupBars::none(),
         )
         .expect("設定應該合法");
 
