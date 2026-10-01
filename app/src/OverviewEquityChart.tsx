@@ -1,7 +1,7 @@
-// ponytail: 跟 EquityCurveChart 同一招——手刻 SVG 折線，不另外引入圖表函式庫。
+// ponytail: 跟 EquityCurveChart 同一招——手刻 SVG，不另外引入圖表函式庫。
 // 這裡畫的是「已結束 session 的最終權益」依時間排列的點，不是連續的帳戶餘額
-// 曲線（兩場 session 之間沒有資料、也不該用直線「插補」出不存在的餘額變化），
-// 所以用散點 + 同場次間細線分段，而不是整條平滑折線。
+// 曲線——不同 session 彼此的權益數字沒有關聯（不同交易對/起始資金），用線
+// 連起來會讓人誤讀成一條走勢線，所以刻意只畫散點，不連線。
 
 export interface OverviewEquityPoint {
   atMs: number;
@@ -43,8 +43,6 @@ export function OverviewEquityChart({ points }: OverviewEquityChartProps) {
   const toY = (value: number) =>
     HEIGHT - PADDING - ((value - minV) / spanV) * (HEIGHT - PADDING * 2);
 
-  const linePoints = points.map((p) => `${toX(p.atMs)},${toY(p.equity)}`).join(" ");
-
   return (
     <svg
       viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
@@ -58,7 +56,6 @@ export function OverviewEquityChart({ points }: OverviewEquityChartProps) {
       <text x={PADDING} y={toY(minV) + 10} className="equity-chart__label">
         {minV.toFixed(0)}
       </text>
-      <polyline points={linePoints} className="equity-chart__line" />
       {points.map((p, i) => (
         <circle key={i} cx={toX(p.atMs)} cy={toY(p.equity)} r={2.5} className="overview-equity-chart__dot">
           <title>

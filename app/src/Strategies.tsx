@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { StrategyConfig, StrategyInfo } from "./strategyTypes";
 import { StrategyParamForm } from "./StrategyParamForm";
 import type { Market } from "./backtestTypes";
-import type { LiveSessionDto, SessionRecord } from "./sessionTypes";
+import type { LiveSessionDto, SessionRecord } from "./overviewTypes";
 import type { PageId } from "./nav";
 
 // 最近 30 天的回測報酬／sparkline 只看「這 30 天內實際跑過的回測」，資料不足
