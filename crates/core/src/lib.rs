@@ -17,6 +17,7 @@ pub mod types;
 
 pub use backtest::{
     run_backtest, BacktestConfig, BacktestError, BacktestResult, EquityPoint, PaperEngine,
+    DEFAULT_MAINTENANCE_MARGIN_RATE,
 };
 pub use bar::{find_gaps, Bar, BarError, Gap, Interval, ParseIntervalError, SeriesError};
 pub use bar_store::{format_bars, parse_bars, read_bars_file, write_bars_file, BarStoreError};
@@ -26,7 +27,7 @@ pub use kline_csv::{parse_klines_csv, read_klines_csv, KlineCsvError};
 pub use metrics::{Metrics, MS_PER_YEAR};
 pub use rules::{RuleViolation, RulesError, SymbolRules};
 pub use strategies::{Bollinger, Donchian, Rsi, SmaCross, StrategyParamError};
-pub use strategy::{Strategy, TargetPosition};
+pub use strategy::{DirectionMode, LeveragedStrategy, Strategy, TargetPosition};
 pub use types::{Liquidity, Market, RunMode, Side, Symbol, SymbolError};
 
 /// 目前版本（來自 Cargo.toml）。

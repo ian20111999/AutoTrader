@@ -27,6 +27,10 @@ const BASE_SUMMARY: BacktestSummary = {
   spanYears: "1",
   feeModel: "spot_vip0（現貨 VIP0，吃單 0.1%）",
   slippage: "0.0005",
+  market: "spot",
+  direction: "long_only",
+  leverage: "1",
+  marginMode: null,
   dataSourcePath: "/tmp/klines/BTCUSDT-1d-2024-01.csv",
 };
 

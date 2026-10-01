@@ -2,8 +2,14 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { StrategyConfig, StrategyInfo } from "./strategyTypes";
-import type { BacktestRequest, BacktestSummary } from "./backtestTypes";
-import { INTERVAL_OPTIONS } from "./backtestTypes";
+import type {
+  BacktestRequest,
+  BacktestSummary,
+  Direction,
+  Market,
+  MarginMode,
+} from "./backtestTypes";
+import { INTERVAL_OPTIONS, LEVERAGE_WARNING_THRESHOLD } from "./backtestTypes";
 import { BacktestResult } from "./BacktestResult";
 
 interface BacktestProps {
@@ -12,8 +18,16 @@ interface BacktestProps {
   onAddToCompare: (summary: BacktestSummary) => void;
 }
 
-function symbolError(raw: string): string | null {
-  return raw.trim() === "" ? "請輸入交易對代號" : null;
+function symbolsError(raw: string): string | null {
+  return parseSymbols(raw).length === 0 ? "請至少輸入一個交易對代號" : null;
+}
+
+// 逗號分隔多個交易對；每個都各自跑一次回測（3.6 的多幣種選擇）。
+function parseSymbols(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
 }
 
 function monthError(raw: string): string | null {
@@ -28,6 +42,14 @@ function capitalError(raw: string): string | null {
   return null;
 }
 
+function leverageError(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") return "請輸入槓桿倍數";
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return "必須是數字";
+  if (Number(trimmed) <= 0) return "槓桿倍數必須大於 0";
+  return null;
+}
+
 function strategySummary(strategy: StrategyInfo, values: Record<string, string>): string {
   return strategy.params.map((param) => `${param.label}${values[param.key] ?? ""}`).join("、");
 }
@@ -36,14 +58,18 @@ type Status = "idle" | "loading" | "error" | "success";
 
 export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: BacktestProps) {
   const [strategies, setStrategies] = useState<StrategyInfo[] | null>(null);
-  const [symbol, setSymbol] = useState("BTCUSDT");
+  const [symbols, setSymbols] = useState("BTCUSDT");
   const [interval, setInterval] = useState<string>("1d");
   const [month, setMonth] = useState("2024-01");
   const [startingCapital, setStartingCapital] = useState("10000");
+  const [market, setMarket] = useState<Market>("spot");
+  const [direction, setDirection] = useState<Direction>("long_only");
+  const [leverage, setLeverage] = useState("1");
+  const [marginMode, setMarginMode] = useState<MarginMode>("isolated");
   const [submitted, setSubmitted] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [summary, setSummary] = useState<BacktestSummary | null>(null);
+  const [results, setResults] = useState<BacktestSummary[] | null>(null);
   const [addedToCompare, setAddedToCompare] = useState(false);
 
   useEffect(() => {
@@ -52,17 +78,33 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
       .catch(() => setStrategies([]));
   }, []);
 
+  const isFutures = market === "usdm_perp";
+
+  // 現貨不支援槓桿/做空：切回現貨時把這兩個設定復位，而不是讓表單送出一個
+  // 現貨+槓桿的不合法組合（後端 summarize 也會擋，但前端先復位體驗比較好）。
+  function handleMarketChange(next: Market) {
+    setMarket(next);
+    if (next === "spot") {
+      setDirection("long_only");
+      setLeverage("1");
+    }
+  }
+
   const selectedStrategy =
     strategyConfig && strategies
       ? (strategies.find((s) => s.id === strategyConfig.strategyId) ?? null)
       : null;
 
   const fieldErrors = {
-    symbol: symbolError(symbol),
+    symbols: symbolsError(symbols),
     month: monthError(month),
     startingCapital: capitalError(startingCapital),
+    leverage: leverageError(leverage),
   };
   const hasFieldError = Object.values(fieldErrors).some((message) => message !== null);
+  const leverageValue = Number(leverage);
+  const overLeverageLimit =
+    !fieldErrors.leverage && leverageValue > LEVERAGE_WARNING_THRESHOLD;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -70,23 +112,32 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
     if (hasFieldError || !strategyConfig) return;
 
     const [yearStr, monthStr] = month.split("-");
-    const request: BacktestRequest = {
-      symbol: symbol.trim(),
-      interval,
-      year: Number(yearStr),
-      month: Number(monthStr),
-      strategyId: strategyConfig.strategyId,
-      params: strategyConfig.values,
-      startingCapital: startingCapital.trim(),
-    };
+    const symbolList = parseSymbols(symbols);
 
     setStatus("loading");
     setErrorMessage(null);
-    setSummary(null);
+    setResults(null);
     setAddedToCompare(false);
     try {
-      const result = await invoke<BacktestSummary>("run_backtest_command", { request });
-      setSummary(result);
+      const runs = await Promise.all(
+        symbolList.map((symbol) => {
+          const request: BacktestRequest = {
+            symbol,
+            interval,
+            year: Number(yearStr),
+            month: Number(monthStr),
+            strategyId: strategyConfig.strategyId,
+            params: strategyConfig.values,
+            startingCapital: startingCapital.trim(),
+            market,
+            direction,
+            leverage: leverage.trim(),
+            marginMode: isFutures ? marginMode : null,
+          };
+          return invoke<BacktestSummary>("run_backtest_command", { request });
+        }),
+      );
+      setResults(runs);
       setStatus("success");
     } catch (err) {
       setErrorMessage(String(err));
@@ -95,8 +146,8 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
   }
 
   function handleAddToCompare() {
-    if (!summary) return;
-    onAddToCompare(summary);
+    if (!results) return;
+    results.forEach(onAddToCompare);
     setAddedToCompare(true);
   }
 
@@ -125,18 +176,18 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
           <legend className="backtest-form__label">資料範圍</legend>
 
           <div className="backtest-form__field">
-            <label htmlFor="backtest-symbol">交易對</label>
+            <label htmlFor="backtest-symbol">交易對（可逗號分隔多個）</label>
             <input
               id="backtest-symbol"
               type="text"
-              value={symbol}
-              onChange={(e) => setSymbol(e.target.value)}
-              aria-invalid={submitted && fieldErrors.symbol ? true : undefined}
-              aria-describedby={submitted && fieldErrors.symbol ? "backtest-symbol-error" : undefined}
+              value={symbols}
+              onChange={(e) => setSymbols(e.target.value)}
+              aria-invalid={submitted && fieldErrors.symbols ? true : undefined}
+              aria-describedby={submitted && fieldErrors.symbols ? "backtest-symbol-error" : undefined}
             />
-            {submitted && fieldErrors.symbol && (
+            {submitted && fieldErrors.symbols && (
               <p id="backtest-symbol-error" role="alert" className="backtest-form__error">
-                {fieldErrors.symbol}
+                {fieldErrors.symbols}
               </p>
             )}
           </div>
@@ -192,6 +243,85 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
               </p>
             )}
           </div>
+        </fieldset>
+
+        <fieldset className="backtest-form__fieldset" disabled={status === "loading"}>
+          <legend className="backtest-form__label">槓桿與方向</legend>
+
+          <div className="backtest-form__field">
+            <label htmlFor="backtest-market">市場</label>
+            <select
+              id="backtest-market"
+              value={market}
+              onChange={(e) => handleMarketChange(e.target.value as Market)}
+            >
+              <option value="spot">現貨</option>
+              <option value="usdm_perp">U 本位合約</option>
+            </select>
+          </div>
+
+          <div className="backtest-form__field">
+            <label htmlFor="backtest-direction">方向</label>
+            <select
+              id="backtest-direction"
+              value={direction}
+              onChange={(e) => setDirection(e.target.value as Direction)}
+              disabled={!isFutures}
+            >
+              <option value="long_only">只做多</option>
+              <option value="long_short">多空</option>
+            </select>
+          </div>
+
+          <div className="backtest-form__field">
+            <label htmlFor="backtest-leverage">槓桿倍數</label>
+            <input
+              id="backtest-leverage"
+              type="range"
+              min="1"
+              max="20"
+              step="0.5"
+              value={leverage}
+              onChange={(e) => setLeverage(e.target.value)}
+              disabled={!isFutures}
+              aria-describedby="backtest-leverage-value"
+            />
+            <span id="backtest-leverage-value" className="backtest-form__range-value">
+              {leverage}x
+            </span>
+            {submitted && fieldErrors.leverage && (
+              <p role="alert" className="backtest-form__error">
+                {fieldErrors.leverage}
+              </p>
+            )}
+            {overLeverageLimit && (
+              <p className="backtest-form__hint backtest-form__hint--warning">
+                超過風控建議上限（{LEVERAGE_WARNING_THRESHOLD}x）
+              </p>
+            )}
+          </div>
+
+          {isFutures && (
+            <div className="backtest-form__field">
+              <label htmlFor="backtest-margin-mode">保證金模式</label>
+              <select
+                id="backtest-margin-mode"
+                value={marginMode}
+                onChange={(e) => setMarginMode(e.target.value as MarginMode)}
+              >
+                <option value="isolated">逐倉</option>
+                <option value="cross">全倉</option>
+              </select>
+            </div>
+          )}
+
+          <div className="backtest-form__field backtest-form__toggle">
+            <label htmlFor="backtest-real-funding">
+              計入真實歷史資金費率
+              <span className="backtest-form__hint"> （即將推出）</span>
+            </label>
+            <input id="backtest-real-funding" type="checkbox" checked={false} disabled readOnly />
+          </div>
 
           <button type="submit" className="backtest-form__submit">
             {status === "loading" ? "回測中…" : "執行回測"}
@@ -210,9 +340,13 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
             回測失敗：{errorMessage}
           </p>
         )}
-        {status === "success" && summary && (
+        {status === "success" && results && (
           <>
-            <BacktestResult summary={summary} />
+            <div className="backtest-results">
+              {results.map((summary) => (
+                <BacktestResult key={summary.symbol} summary={summary} />
+              ))}
+            </div>
             <div className="backtest-result-actions">
               <button
                 type="button"

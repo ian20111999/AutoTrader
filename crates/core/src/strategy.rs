@@ -80,6 +80,74 @@ pub trait Strategy {
     }
 }
 
+/// 方向模式：UI 上的「只做多／多空」選項。
+///
+/// 內建的四個策略（均線交叉、布林通道、唐奇安、RSI）目前只會回傳
+/// [`TargetPosition::FLAT`] 或 [`TargetPosition::FULL_LONG`]，從來不會自己做空——
+/// 做不做空、開多少槓桿是帳戶層的風險設定，不是策略邏輯本身，所以用
+/// [`LeveragedStrategy`] 包一層，而不是修改這四個策略或 [`TargetPosition`] 的定義。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectionMode {
+    /// 只做多：策略空手就維持空手。
+    LongOnly,
+    /// 多空都做：策略空手時鏡像成反向（做空），讓只會做多/空手的策略變成
+    /// 「永遠在場」。策略如果自己回傳負的目標部位（未來的空頭策略），
+    /// 方向維持不變，只套槓桿。
+    LongShort,
+}
+
+/// 把內層策略的原始訊號套上槓桿倍數與方向模式，轉成實際要送進
+/// [`crate::backtest::run_backtest`] 的目標部位。
+///
+/// 這是刻意選的設計：不改 [`TargetPosition`]（已經是穩定介面，語意是「策略自己
+/// 想要的部位比例，可以帶槓桿」）、也不改四個內建策略（它們就是只想表達
+/// 「做多」或「空手」）。UI 的槓桿拉桿、多空切換是帳戶層的設定，用 adapter
+/// 包一層最乾淨：內層策略專心判斷方向，外層只管把比例放大、把「空手」
+/// 轉成「反向」。
+pub struct LeveragedStrategy {
+    inner: Box<dyn Strategy + Send>,
+    leverage: Fixed,
+    direction: DirectionMode,
+}
+
+impl LeveragedStrategy {
+    /// `leverage` 必須大於 0（呼叫端負責驗證；這裡不重複檢查，無法用的槓桿
+    /// 會在算出目標部位時變成 `0`，退化成空手，不會 panic）。
+    pub fn new(
+        inner: Box<dyn Strategy + Send>,
+        leverage: Fixed,
+        direction: DirectionMode,
+    ) -> LeveragedStrategy {
+        LeveragedStrategy {
+            inner,
+            leverage,
+            direction,
+        }
+    }
+}
+
+impl Strategy for LeveragedStrategy {
+    fn on_bar(&mut self, bar: &Bar) -> TargetPosition {
+        let raw = self.inner.on_bar(bar).ratio();
+        // 內層策略想做多/做空：維持方向、套槓桿。溢位（槓桿設得離譜）寧可空手。
+        if !raw.is_zero() {
+            return match raw.checked_mul(self.leverage) {
+                Some(scaled) => TargetPosition::new(scaled),
+                None => TargetPosition::FLAT,
+            };
+        }
+        // 內層策略空手：只做多模式維持空手；多空模式鏡像成槓桿做空。
+        match self.direction {
+            DirectionMode::LongOnly => TargetPosition::FLAT,
+            DirectionMode::LongShort => TargetPosition::short(self.leverage),
+        }
+    }
+
+    fn warmup_bars(&self) -> usize {
+        self.inner.warmup_bars()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +324,58 @@ mod tests {
                 TargetPosition::FULL_LONG, // 103 > 102
             ]
         );
+    }
+
+    #[test]
+    fn leveraged_long_only_scales_long_and_keeps_flat_flat() {
+        let bars = bars(&["100", "101", "99"]);
+        let mut s = LeveragedStrategy::new(Box::new(AlwaysLong), fx("3"), DirectionMode::LongOnly);
+        assert_eq!(run(&mut s, &bars), vec![TargetPosition::new(fx("3")); 3]);
+
+        let mut flat =
+            LeveragedStrategy::new(Box::new(AlwaysFlat), fx("3"), DirectionMode::LongOnly);
+        assert_eq!(run(&mut flat, &bars), vec![TargetPosition::FLAT; 3]);
+    }
+
+    #[test]
+    fn leveraged_long_short_mirrors_flat_into_a_leveraged_short() {
+        let bars = bars(&["100", "101", "99"]);
+        let mut s = LeveragedStrategy::new(Box::new(AlwaysFlat), fx("2"), DirectionMode::LongShort);
+        assert_eq!(run(&mut s, &bars), vec![TargetPosition::short(fx("2")); 3]);
+
+        let mut long =
+            LeveragedStrategy::new(Box::new(AlwaysLong), fx("2"), DirectionMode::LongShort);
+        assert_eq!(run(&mut long, &bars), vec![TargetPosition::new(fx("2")); 3]);
+    }
+
+    #[test]
+    fn leveraged_strategy_keeps_inner_warmup() {
+        let s = LeveragedStrategy::new(
+            Box::new(HigherThanWindowStart {
+                window: 5,
+                history: Vec::new(),
+            }),
+            fx("1"),
+            DirectionMode::LongOnly,
+        );
+        assert_eq!(s.warmup_bars(), 5);
+    }
+
+    #[test]
+    fn leveraged_strategy_overflow_degrades_to_flat_not_panic() {
+        // 槓桿離譜大時，ratio 相乘會溢位；要寧可空手也不 panic。
+        struct HugeLong;
+        impl Strategy for HugeLong {
+            fn on_bar(&mut self, _bar: &Bar) -> TargetPosition {
+                TargetPosition::new(Fixed::from_raw(i64::MAX))
+            }
+        }
+        let mut s = LeveragedStrategy::new(
+            Box::new(HugeLong),
+            Fixed::from_raw(i64::MAX),
+            DirectionMode::LongOnly,
+        );
+        assert_eq!(s.on_bar(&bars(&["100"])[0]), TargetPosition::FLAT);
     }
 
     #[test]
