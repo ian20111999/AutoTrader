@@ -44,6 +44,7 @@ fn market(count: usize) -> Vec<Bar> {
             low: Fixed::from_raw((open.min(close) - spread).max(1)),
             close: Fixed::from_raw(close),
             volume: 1_000.0 + (seed % 5_000) as f64,
+            order_flow: None,
         };
         assert_eq!(bar.validate(), Ok(()), "測試資料本身要是合理的 K 線");
         bars.push(bar);

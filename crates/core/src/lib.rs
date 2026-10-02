@@ -21,7 +21,9 @@ pub use backtest::{
     run_backtest, BacktestConfig, BacktestError, BacktestResult, EquityPoint, PaperEngine,
     DEFAULT_MAINTENANCE_MARGIN_RATE,
 };
-pub use bar::{find_gaps, Bar, BarError, Gap, Interval, ParseIntervalError, SeriesError};
+pub use bar::{
+    find_gaps, Bar, BarError, Gap, Interval, OrderFlow, ParseIntervalError, SeriesError,
+};
 pub use bar_store::{format_bars, parse_bars, read_bars_file, write_bars_file, BarStoreError};
 pub use fees::{CommissionRates, FeeError, FeeModel, FeeSchedule, FuturesFees, SpotFees};
 pub use fixed::{Fixed, ParseFixedError};

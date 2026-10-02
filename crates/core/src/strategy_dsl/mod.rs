@@ -178,6 +178,11 @@ pub enum PriceField {
     /// 成交量。`Bar::volume` 是 `f64`，進 DSL 時做一次確定性轉換
     /// （詳見 `eval::volume_to_fixed`）。
     Volume,
+    /// 這根 K 線的成交筆數。來源沒提供訂單流時無法判定（→ 空手）。
+    Trades,
+    /// 主動買盤佔比 = 主動買方成交量 ÷ 總成交量，範圍 0～1。
+    /// 來源沒提供、或這根完全沒成交（分母為 0）時無法判定。
+    TakerBuyRatio,
 }
 
 /// 支援的指標。

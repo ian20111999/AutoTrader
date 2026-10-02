@@ -313,6 +313,7 @@ mod tests {
             low: "41980".parse().unwrap(),
             close: "42020".parse().unwrap(),
             volume: 12.345,
+            order_flow: None,
         }];
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         write_bars_file(&bars, &path).unwrap();

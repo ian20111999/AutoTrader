@@ -78,6 +78,15 @@ pub trait Strategy {
     fn warmup_bars(&self) -> usize {
         0
     }
+
+    /// 這支策略會不會讀 K 線的訂單流欄位（成交筆數、主動買盤佔比）。
+    ///
+    /// 和 `warmup_bars()` 一樣只是宣告：回 `true` 的策略餵到沒有訂單流的
+    /// K 線時仍然必須安全地回傳空手。呼叫端用它在**跑之前**就擋下
+    /// 「策略要訂單流、資料沒有」這種會靜默產生零交易回測的組合。
+    fn needs_order_flow(&self) -> bool {
+        false
+    }
 }
 
 /// 方向模式：UI 上的「只做多／多空」選項。
@@ -146,6 +155,10 @@ impl Strategy for LeveragedStrategy {
     fn warmup_bars(&self) -> usize {
         self.inner.warmup_bars()
     }
+
+    fn needs_order_flow(&self) -> bool {
+        self.inner.needs_order_flow()
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +185,7 @@ mod tests {
                     low: close,
                     close,
                     volume: 1.0,
+                    order_flow: None,
                 }
             })
             .collect()

@@ -379,6 +379,18 @@ fn summarize_with_strategy(
     })
 }
 
+/// 這段 K 線有沒有訂單流（成交筆數／主動買盤量）。
+///
+/// 只看第一根就夠：`bar_store` 的規則 2 已經保證本機檔案同檔不混欄數，
+/// Binance 官方 CSV（`kline_csv`）永遠是 12 欄、永遠有。空陣列視為「有」，
+/// 讓呼叫端的其他驗證（例如「沒有資料」）先報自己的錯誤。
+fn bars_have_order_flow(bars: &[Bar]) -> bool {
+    match bars.first() {
+        Some(bar) => bar.order_flow.is_some(),
+        None => true,
+    }
+}
+
 /// 純邏輯：拿到 K 線之後的「建立策略→驗證市場設定→包槓桿→跑回測→算績效→
 /// 組 DTO」，不碰檔案系統或網路，方便直接餵假資料測試。
 fn summarize(
@@ -423,6 +435,13 @@ fn summarize(
             let name = strategy_display_name(&request.strategy_id)?;
             (strategy, name)
         };
+    if strategy.needs_order_flow() && !bars_have_order_flow(bars) {
+        return Err(
+            "這份策略用到訂單流（成交筆數／主動買盤佔比），但本機的 K 線檔是舊格式\
+             （6 欄）。請到「資料下載」重新下載這個交易對與週期的歷史 K 線"
+                .to_string(),
+        );
+    }
     let mut strategy = LeveragedStrategy::new(strategy, leverage, direction);
 
     let fee_model = match market {
@@ -875,6 +894,7 @@ mod tests {
                 low: c,
                 close: c,
                 volume: 1.0,
+                order_flow: None,
             })
             .collect()
     }
@@ -1307,6 +1327,42 @@ mod tests {
         assert_eq!(summary.strategy_name, "自訂策略（DSL）");
         assert_eq!(summary.bar_count, bars.len());
         assert_eq!(summary.curve.len(), bars.len());
+    }
+
+    #[test]
+    fn strategy_needing_order_flow_on_bars_without_it_is_a_clear_error_not_a_silent_zero_trade_result(
+    ) {
+        // D6 的驗收：策略要訂單流、資料是舊格式（全部 order_flow: None）→
+        // 必須是清楚的錯誤，不可以是「跑完、零筆交易、績效全 0」看起來正常的結果。
+        let bars = trending_bars();
+        assert!(
+            bars.iter().all(|b| b.order_flow.is_none()),
+            "trending_bars() 是測試輔助函式產生的合成 K 線，本來就沒有訂單流"
+        );
+        let mut req = request("custom", &[], "10000");
+        req.dsl_json = Some(
+            serde_json::json!({
+                "schemaVersion": 1,
+                "direction": "long_only",
+                "sizing": { "positionPct": "100", "leverage": "1" },
+                "longEntry": {
+                    "kind": "gt",
+                    "left":  { "kind": "price", "field": "taker_buy_ratio" },
+                    "right": { "kind": "number", "value": "0.6" }
+                },
+                "longExit": {
+                    "kind": "lte",
+                    "left":  { "kind": "price", "field": "taker_buy_ratio" },
+                    "right": { "kind": "number", "value": "0.6" }
+                }
+            })
+            .to_string(),
+        );
+
+        let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+            .expect_err("策略需要訂單流但資料沒有，必須回錯誤，不能回一份看起來正常的回測結果");
+        assert!(err.contains("訂單流"), "{err}");
+        assert!(err.contains("6 欄"), "{err}");
     }
 
     #[test]

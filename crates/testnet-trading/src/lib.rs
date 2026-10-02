@@ -518,6 +518,7 @@ mod tests {
             low: close,
             close,
             volume: 1.0,
+            order_flow: None,
         }
     }
 

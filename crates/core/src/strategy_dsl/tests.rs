@@ -25,6 +25,7 @@ fn closes(values: &[&str]) -> Vec<Bar> {
                 low: close,
                 close,
                 volume: 1.0,
+                order_flow: None,
             }
         })
         .collect()
@@ -668,6 +669,7 @@ fn wavy(count: usize) -> Vec<Bar> {
                 low: price,
                 close: price,
                 volume: 1.0,
+                order_flow: None,
             }
         })
         .collect()
@@ -716,6 +718,148 @@ fn volume_can_be_compared_in_the_fixed_domain() {
     // 超過 Fixed 上限（約 922 億）→ None → 空手，不做飽和
     bars[2].volume = 1e20;
     assert_eq!(signals(&mut strategy, &bars), ".L.");
+}
+
+// ---------------------------------------------------------------------------
+// 訂單流欄位（trades／taker_buy_ratio）
+// ---------------------------------------------------------------------------
+
+/// 把 `order_flow` 套在 `closes()` 產生的 K 線上。
+fn with_order_flow(mut bars: Vec<Bar>, flows: &[Option<(u64, f64)>]) -> Vec<Bar> {
+    assert_eq!(bars.len(), flows.len());
+    for (bar, flow) in bars.iter_mut().zip(flows) {
+        bar.order_flow = flow.map(|(trades, taker_buy_volume)| crate::bar::OrderFlow {
+            trades,
+            taker_buy_volume,
+        });
+    }
+    bars
+}
+
+#[test]
+fn taker_buy_ratio_is_none_when_order_flow_is_missing() {
+    // 來源沒提供訂單流（例如 6 欄舊檔）：三值邏輯 → 兩邊都無法判定 → 空手，
+    // 不可以被當成 0。
+    let mut strategy = compile_long_only(
+        r#"{"kind":"lt","left":{"kind":"price","field":"taker_buy_ratio"},
+            "right":{"kind":"number","value":"0.3"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    let bars = closes(&["10", "10"]); // order_flow: None
+    assert_eq!(signals(&mut strategy, &bars), "..");
+}
+
+#[test]
+fn taker_buy_ratio_is_none_when_volume_is_zero() {
+    // 這根真的沒成交：分母為 0，比例「無法判定」，不是「主動買盤為 0」。
+    let mut strategy = compile_long_only(
+        r#"{"kind":"lt","left":{"kind":"price","field":"taker_buy_ratio"},
+            "right":{"kind":"number","value":"0.3"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    let mut bars = with_order_flow(closes(&["10"]), &[Some((0, 0.0))]);
+    bars[0].volume = 0.0;
+    assert_eq!(signals(&mut strategy, &bars), ".");
+}
+
+#[test]
+fn taker_buy_ratio_computes_correctly_when_data_is_present() {
+    let mut strategy = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"price","field":"taker_buy_ratio"},
+            "right":{"kind":"number","value":"0.55"}}"#,
+        r#"{"kind":"lte","left":{"kind":"price","field":"taker_buy_ratio"},
+            "right":{"kind":"number","value":"0.55"}}"#,
+    )
+    .unwrap();
+    let mut bars = with_order_flow(closes(&["10", "10"]), &[Some((10, 6.0)), Some((10, 5.0))]);
+    bars[0].volume = 10.0; // 6/10 = 0.6 > 0.55
+    bars[1].volume = 10.0; // 5/10 = 0.5 <= 0.55
+    assert_eq!(signals(&mut strategy, &bars), "L.");
+}
+
+#[test]
+fn sma_of_taker_buy_ratio_can_compile_and_run() {
+    // 驗證 `Expr::Indicator.source` 本來就吃任何 `Expr`，`taker_buy_ratio` 不用
+    // 額外改動就能被 sma 當輸入。
+    let entry = r#"{"kind":"gt",
+        "left":{"kind":"indicator","name":"sma","params":{"period":2},
+                 "source":{"kind":"price","field":"taker_buy_ratio"}},
+        "right":{"kind":"number","value":"0"}}"#;
+    let mut strategy = compile_long_only(entry, NEVER).unwrap();
+    assert!(strategy.needs_order_flow());
+    let bars = with_order_flow(closes(&["10", "10", "10"]), &[Some((1, 0.5)); 3]);
+    // 不 panic、能跑完就算通過。
+    let _ = signals(&mut strategy, &bars);
+}
+
+#[test]
+fn trades_field_reads_the_raw_count() {
+    let mut strategy = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"price","field":"trades"},
+            "right":{"kind":"number","value":"100"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    let bars = with_order_flow(closes(&["10", "10"]), &[Some((50, 1.0)), Some((150, 1.0))]);
+    assert_eq!(signals(&mut strategy, &bars), ".L");
+}
+
+#[test]
+fn custom_strategy_reports_needs_order_flow_only_when_used() {
+    let without = compile_long_only(ALWAYS, NEVER).unwrap();
+    assert!(!without.needs_order_flow());
+
+    let with_trades = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"price","field":"trades"},
+            "right":{"kind":"number","value":"0"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    assert!(with_trades.needs_order_flow());
+
+    let with_ratio = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"price","field":"taker_buy_ratio"},
+            "right":{"kind":"number","value":"0"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    assert!(with_ratio.needs_order_flow());
+}
+
+/// 攤平器是後序走訪整棵樹，巢狀多深都一樣會被排進同一個扁平陣列——這裡故意把
+/// `taker_buy_ratio` 藏在 all > any > sustained > indicator(sma).source 四層
+/// 巢狀底下，`trades` 藏在 any > sustained 兩層底下，確認掃描不會因為巢狀而漏掉。
+#[test]
+fn custom_strategy_reports_needs_order_flow_even_when_deeply_nested() {
+    let ratio_four_levels_deep = compile_long_only(
+        r#"{"kind":"all","children":[
+            {"kind":"any","children":[
+                {"kind":"sustained","bars":1,"inner":
+                    {"kind":"gt",
+                     "left":{"kind":"indicator","name":"sma","params":{"period":2},
+                              "source":{"kind":"price","field":"taker_buy_ratio"}},
+                     "right":{"kind":"number","value":"0"}}
+                }
+            ]}
+        ]}"#,
+        NEVER,
+    )
+    .unwrap();
+    assert!(ratio_four_levels_deep.needs_order_flow());
+
+    let trades_two_levels_deep = compile_long_only(
+        r#"{"kind":"any","children":[
+            {"kind":"sustained","bars":1,"inner":
+                {"kind":"gt","left":{"kind":"price","field":"trades"},
+                 "right":{"kind":"number","value":"0"}}
+            }
+        ]}"#,
+        NEVER,
+    )
+    .unwrap();
+    assert!(trades_two_levels_deep.needs_order_flow());
 }
 
 // ---------------------------------------------------------------------------

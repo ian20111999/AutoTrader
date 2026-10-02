@@ -220,6 +220,7 @@ pub(crate) mod test_util {
             low: fx(low),
             close: fx(close),
             volume: 1.0,
+            order_flow: None,
         };
         assert_eq!(bar.validate(), Ok(()), "測試資料本身要是合理的 K 線");
         bar
@@ -265,6 +266,7 @@ pub(crate) mod test_util {
                     low: tiny,
                     close,
                     volume: 1.0,
+                    order_flow: None,
                 }
             })
             .collect()

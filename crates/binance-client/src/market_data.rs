@@ -25,7 +25,7 @@
 //! 這是 6.4／6.5 既有的分工。
 
 use crate::{public_get, BinanceError};
-use at_core::{Bar, Fixed, Interval, Symbol, WarmupBars};
+use at_core::{Bar, Fixed, Interval, OrderFlow, Symbol, WarmupBars};
 use serde_json::Value;
 
 const KLINES_PATH: &str = "/api/v3/klines";
@@ -84,12 +84,14 @@ pub fn recent_closed_bars(
     })
 }
 
-/// 解析 `/api/v3/klines` 的回應：JSON 陣列的陣列，每筆的前 6 個欄位是
+/// 解析 `/api/v3/klines` 的回應：JSON 陣列的陣列，每筆前 6 個欄位是
 /// `[開盤時間, 開, 高, 低, 收, 量]`（和 1.5 的官方 CSV 同一組欄位，
-/// 見 [`at_core::parse_klines_csv`]）。
+/// 見 [`at_core::parse_klines_csv`]），第 9、10 欄（索引 `[8]`／`[9]`）
+/// 是成交筆數與主動買方成交量，組成 `OrderFlow`。
 ///
-/// 刻意只讀前 6 欄、不定義完整的 12 欄結構：`Bar` 只放得下這 6 個，而交易所
-/// 之後在後面加欄位也不會讓解析失敗。
+/// 欄位數 `>= 10` 才讀訂單流，否則 `order_flow: None`（由呼叫端的
+/// `needs_order_flow()` 檢查擋下，不會靜默變成零交易）。交易所之後在
+/// 後面加欄位也不會讓解析失敗。
 ///
 /// 外部輸入一律回 [`Result`]，沒有任何 `unwrap`。
 fn parse_klines_json(body: &str) -> Result<Vec<Bar>, BinanceError> {
@@ -115,6 +117,21 @@ fn parse_row((index, row): (usize, &Vec<Value>)) -> Result<Bar, BinanceError> {
             .map_err(|_| bad(field))
     };
 
+    let order_flow = if row.len() >= 10 {
+        let trades = row[8].as_u64().ok_or_else(|| bad("成交筆數"))?;
+        let taker_buy_volume = row[9]
+            .as_str()
+            .ok_or_else(|| bad("主動買方成交量"))?
+            .parse::<f64>()
+            .map_err(|_| bad("主動買方成交量"))?;
+        Some(OrderFlow {
+            trades,
+            taker_buy_volume,
+        })
+    } else {
+        None
+    };
+
     let bar = Bar {
         open_time: row[0].as_i64().ok_or_else(|| bad("開盤時間"))?,
         open: price(1, "開盤價")?,
@@ -127,6 +144,7 @@ fn parse_row((index, row): (usize, &Vec<Value>)) -> Result<Bar, BinanceError> {
             .ok_or_else(|| bad("成交量"))?
             .parse::<f64>()
             .map_err(|_| bad("成交量"))?,
+        order_flow,
     };
     bar.validate()
         .map_err(|e| BinanceError::Response(format!("歷史 K 線第 {no} 筆不合理：{e}")))?;
@@ -158,6 +176,13 @@ mod tests {
         assert_eq!(bars[0].close, fx("42020"));
         assert!((bars[0].volume - 12.345).abs() < 1e-9);
         assert_eq!(bars[1].open_time, 1_704_067_260_000);
+        assert_eq!(
+            bars[0].order_flow,
+            Some(OrderFlow {
+                trades: 308,
+                taker_buy_volume: 6.0,
+            })
+        );
     }
 
     #[test]

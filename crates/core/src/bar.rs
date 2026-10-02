@@ -96,6 +96,23 @@ impl fmt::Display for Interval {
     }
 }
 
+/// 一根 K 線的訂單流：Binance 在每根 K 線裡附的成交結構資訊。
+///
+/// `Bar` 的 `Option<OrderFlow>` 是 `None` 代表「這筆資料的來源沒有提供訂單流」
+/// （6 欄的舊格式本機檔、測試用的合成 K 線）。
+/// 「這根 K 線真的沒有成交」是 `Some(OrderFlow { trades: 0, taker_buy_volume: 0.0 })`
+/// ——Binance 對完全沒成交的分鐘確實會發這種 K 線（開高低收都等於前收、量為 0）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OrderFlow {
+    /// 這根 K 線內的成交筆數（Binance CSV 第 9 欄、WebSocket `k.n`）。
+    pub trades: u64,
+    /// 主動買方（taker buy）成交量，**以基礎幣計，和 `Bar::volume` 同單位**
+    /// （CSV 第 10 欄、WebSocket `k.V`）。
+    ///
+    /// 和 `volume` 一樣用 `f64`：它只用來產生訊號與統計，不參與任何下單數量計算。
+    pub taker_buy_volume: f64,
+}
+
 /// 一根 K 線。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bar {
@@ -107,6 +124,8 @@ pub struct Bar {
     pub close: Fixed,
     /// 成交量（以基礎幣計）。只用在統計，所以用 `f64`。
     pub volume: f64,
+    /// 訂單流（成交筆數、主動買盤量）。`None` 代表來源沒有提供，不代表沒有成交。
+    pub order_flow: Option<OrderFlow>,
 }
 
 /// 單根 K 線不合理的原因。
@@ -120,6 +139,8 @@ pub enum BarError {
     LowTooHigh,
     /// 成交量是負數或不是有限數字。
     BadVolume,
+    /// 主動買方成交量是負數、不是有限數字，或超過總成交量。
+    BadOrderFlow,
 }
 
 impl fmt::Display for BarError {
@@ -129,6 +150,9 @@ impl fmt::Display for BarError {
             BarError::HighTooLow => write!(f, "最高價低於開盤、收盤或最低價"),
             BarError::LowTooHigh => write!(f, "最低價高於開盤或收盤價"),
             BarError::BadVolume => write!(f, "成交量必須是 ≥ 0 的有限數字"),
+            BarError::BadOrderFlow => {
+                write!(f, "主動買方成交量必須是 0 到成交量之間的有限數字")
+            }
         }
     }
 }
@@ -150,6 +174,12 @@ impl Bar {
         }
         if !self.volume.is_finite() || self.volume < 0.0 {
             return Err(BarError::BadVolume);
+        }
+        if let Some(flow) = self.order_flow {
+            let v = flow.taker_buy_volume;
+            if !v.is_finite() || v < 0.0 || v > self.volume {
+                return Err(BarError::BadOrderFlow);
+            }
         }
         Ok(())
     }
@@ -255,6 +285,7 @@ mod tests {
             low: fx(l),
             close: fx(c),
             volume: 12.5,
+            order_flow: None,
         }
     }
 
@@ -326,6 +357,49 @@ mod tests {
         assert_eq!(b.validate(), Err(BarError::BadVolume));
         b.volume = f64::NAN;
         assert_eq!(b.validate(), Err(BarError::BadVolume));
+    }
+
+    #[test]
+    fn order_flow_none_is_valid() {
+        let b = bar(T0, "100", "110", "90", "105");
+        assert_eq!(b.order_flow, None);
+        assert_eq!(b.validate(), Ok(()));
+    }
+
+    #[test]
+    fn no_trade_bar_with_order_flow_is_valid() {
+        let mut b = bar(T0, "100", "100", "100", "100");
+        b.volume = 0.0;
+        b.order_flow = Some(OrderFlow {
+            trades: 0,
+            taker_buy_volume: 0.0,
+        });
+        assert_eq!(b.validate(), Ok(()));
+    }
+
+    #[test]
+    fn taker_buy_volume_exceeding_volume_is_rejected() {
+        let mut b = bar(T0, "100", "110", "90", "105");
+        b.order_flow = Some(OrderFlow {
+            trades: 10,
+            taker_buy_volume: b.volume + 1.0,
+        });
+        assert_eq!(b.validate(), Err(BarError::BadOrderFlow));
+    }
+
+    #[test]
+    fn negative_or_nonfinite_taker_buy_volume_is_rejected() {
+        let mut b = bar(T0, "100", "110", "90", "105");
+        b.order_flow = Some(OrderFlow {
+            trades: 10,
+            taker_buy_volume: -1.0,
+        });
+        assert_eq!(b.validate(), Err(BarError::BadOrderFlow));
+        b.order_flow = Some(OrderFlow {
+            trades: 10,
+            taker_buy_volume: f64::NAN,
+        });
+        assert_eq!(b.validate(), Err(BarError::BadOrderFlow));
     }
 
     #[test]

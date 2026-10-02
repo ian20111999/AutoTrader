@@ -37,7 +37,7 @@
 //! 緩衝區裡，下一次 `read` 會接著讀完
 //! （<https://docs.rs/tungstenite/0.30.0/tungstenite/protocol/struct.WebSocket.html#method.read>）。
 
-use at_core::{Bar, Fixed, Interval, Symbol};
+use at_core::{Bar, Fixed, Interval, OrderFlow, Symbol};
 use serde::Deserialize;
 use std::fmt;
 use std::io;
@@ -370,6 +370,12 @@ struct RawKline {
     c: String,
     v: String,
     x: bool,
+    /// 這根 K 線內的成交筆數。
+    n: u64,
+    /// 主動買方成交量（基礎幣計）。小寫 `v` 已經是總成交量，兩個欄位
+    /// 不能都叫 `v`，用 `rename` 對應 Binance 的大寫 `V`。
+    #[serde(rename = "V")]
+    taker_buy_volume: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -391,6 +397,10 @@ fn kline_event(raw: RawKlineEvent) -> Option<MarketEvent> {
         low: raw.k.l.parse().ok()?,
         close: raw.k.c.parse().ok()?,
         volume: raw.k.v.parse().ok()?,
+        order_flow: Some(OrderFlow {
+            trades: raw.k.n,
+            taker_buy_volume: raw.k.taker_buy_volume.parse().ok()?,
+        }),
     };
     bar.validate().ok()?;
     Some(MarketEvent::Kline(KlineUpdate {
@@ -493,6 +503,13 @@ mod tests {
         assert_eq!(k.bar.high, fx("50020.00"));
         assert_eq!(k.bar.low, fx("49990.00"));
         assert_eq!(k.bar.volume, 12.345);
+        assert_eq!(
+            k.bar.order_flow,
+            Some(OrderFlow {
+                trades: 50,
+                taker_buy_volume: 6.0,
+            })
+        );
         assert_eq!(k.event_time_ms, 1_790_000_000_123);
     }
 

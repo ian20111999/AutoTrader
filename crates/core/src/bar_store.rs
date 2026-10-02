@@ -4,16 +4,24 @@
 //! 重新解析原始 CSV。
 //!
 //! 格式跟 1.5 的 Binance CSV 類似（逗號分隔、無 header、每行一根），
-//! 但只存 `Bar` 真正有的 6 個欄位：
+//! 存 `Bar` 的欄位：
 //!
 //! ```text
-//! open_time(ms), open, high, low, close, volume
+//! open_time(ms), open, high, low, close, volume[, trades, taker_buy_volume]
 //! ```
 //!
 //! 這是這個專案自己的格式，不是 Binance 的格式，所以不重用
-//! `kline_csv` 的解析器（欄位數不同：6 欄不是 12 欄）。
+//! `kline_csv` 的解析器（欄位數不同：6/8 欄不是 12 欄）。
+//!
+//! **版本用欄位數自我描述**（不加版本號那一行）：6 欄是舊格式（沒有訂單流，
+//! 讀成 `order_flow: None`），8 欄是新格式（多了成交筆數、主動買方成交量）。
+//! 同一個檔案裡所有行的欄位數必須一致——第一個非空行決定這個檔案是 6 欄還是
+//! 8 欄，之後任何一行欄位數不同都是 `WrongFieldCount` 錯誤，不會把「半欄數」
+//! 的檔案靜默讀成一段有訂單流、一段沒有。
+//! 寫檔：只有全部 `Bar` 都有 `order_flow` 才寫 8 欄，否則寫 6 欄
+//! （所以舊的 golden 測試不用改也會綠）。
 
-use crate::bar::{Bar, BarError};
+use crate::bar::{Bar, BarError, OrderFlow};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -23,7 +31,7 @@ use std::str::FromStr;
 /// 儲存或讀取本機 K 線檔失敗的原因。`line` 是第幾行（從 1 起算）。
 #[derive(Debug)]
 pub enum BarStoreError {
-    /// 欄位數不是 6。
+    /// 欄位數不是 6 也不是 8，或者和同一檔案裡前面的行欄位數不一致。
     WrongFieldCount { line: usize, found: usize },
     /// 某一欄不是合法數字。
     BadNumber { line: usize, field: &'static str },
@@ -38,7 +46,11 @@ impl fmt::Display for BarStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BarStoreError::WrongFieldCount { line, found } => {
-                write!(f, "第 {line} 行欄位數不對：應該有 6 欄，實際有 {found} 欄")
+                write!(
+                    f,
+                    "第 {line} 行欄位數不對：應該是 6 欄（舊格式）或 8 欄（含訂單流），\
+且同一檔案內欄位數必須一致，實際有 {found} 欄"
+                )
             }
             BarStoreError::BadNumber { line, field } => {
                 write!(f, "第 {line} 行的 {field} 欄不是合法數字")
@@ -65,14 +77,24 @@ fn parse_field<T: FromStr>(
         .map_err(|_| BarStoreError::BadNumber { line, field: name })
 }
 
-fn parse_line(line: &str, line_no: usize) -> Result<Bar, BarStoreError> {
+/// 解析一行，`expected_fields` 是這個檔案（由第一個非空行決定）的欄位數，
+/// 6 或 8。行的實際欄位數和它不同就是 `WrongFieldCount`。
+fn parse_line(line: &str, line_no: usize, expected_fields: usize) -> Result<Bar, BarStoreError> {
     let fields: Vec<&str> = line.split(',').collect();
-    if fields.len() != 6 {
+    if fields.len() != expected_fields {
         return Err(BarStoreError::WrongFieldCount {
             line: line_no,
             found: fields.len(),
         });
     }
+    let order_flow = if expected_fields == 8 {
+        Some(OrderFlow {
+            trades: parse_field(fields[6], line_no, "trades")?,
+            taker_buy_volume: parse_field(fields[7], line_no, "taker_buy_volume")?,
+        })
+    } else {
+        None
+    };
     let bar = Bar {
         open_time: parse_field(fields[0], line_no, "open_time")?,
         open: parse_field(fields[1], line_no, "open")?,
@@ -80,6 +102,7 @@ fn parse_line(line: &str, line_no: usize) -> Result<Bar, BarStoreError> {
         low: parse_field(fields[3], line_no, "low")?,
         close: parse_field(fields[4], line_no, "close")?,
         volume: parse_field(fields[5], line_no, "volume")?,
+        order_flow,
     };
     bar.validate().map_err(|source| BarStoreError::InvalidBar {
         line: line_no,
@@ -89,26 +112,51 @@ fn parse_line(line: &str, line_no: usize) -> Result<Bar, BarStoreError> {
 }
 
 /// 把儲存格式的文字內容解析成 `Vec<Bar>`。空白行會被跳過；空輸入回傳空陣列。
+///
+/// 欄位數由第一個非空行決定（6 或 8），其餘行欄位數必須和它一致。
 pub fn parse_bars(content: &str) -> Result<Vec<Bar>, BarStoreError> {
-    content
+    let mut lines = content
         .lines()
         .enumerate()
-        .filter(|(_, line)| !line.trim().is_empty())
-        .map(|(idx, line)| parse_line(line, idx + 1))
-        .collect()
+        .filter(|(_, line)| !line.trim().is_empty());
+
+    let Some((first_idx, first_line)) = lines.next() else {
+        return Ok(Vec::new());
+    };
+    let expected_fields = first_line.split(',').count();
+    if expected_fields != 6 && expected_fields != 8 {
+        return Err(BarStoreError::WrongFieldCount {
+            line: first_idx + 1,
+            found: expected_fields,
+        });
+    }
+
+    let mut bars = vec![parse_line(first_line, first_idx + 1, expected_fields)?];
+    for (idx, line) in lines {
+        bars.push(parse_line(line, idx + 1, expected_fields)?);
+    }
+    Ok(bars)
 }
 
 /// 把 `Vec<Bar>` 轉成儲存格式的文字內容。
 ///
 /// 用 `Fixed`、`i64`、`f64` 各自的 `Display` 序列化，對應 `parse_bars`
 /// 用它們的 `FromStr` 還原，兩邊都已經測過會 round-trip（見 1.1、1.2）。
+///
+/// 只有全部 `Bar` 都有 `order_flow` 才寫 8 欄，否則寫 6 欄（不混欄數）。
 pub fn format_bars(bars: &[Bar]) -> String {
+    let with_order_flow = !bars.is_empty() && bars.iter().all(|b| b.order_flow.is_some());
     let mut out = String::new();
     for bar in bars {
         out.push_str(&format!(
-            "{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{}",
             bar.open_time, bar.open, bar.high, bar.low, bar.close, bar.volume
         ));
+        if with_order_flow {
+            let flow = bar.order_flow.expect("checked by with_order_flow above");
+            out.push_str(&format!(",{},{}", flow.trades, flow.taker_buy_volume));
+        }
+        out.push('\n');
     }
     out
 }
@@ -142,6 +190,25 @@ mod tests {
             low: fx(l),
             close: fx(c),
             volume,
+            order_flow: None,
+        }
+    }
+
+    fn bar_with_flow(
+        open_time: i64,
+        o: &str,
+        h: &str,
+        l: &str,
+        c: &str,
+        volume: f64,
+        flow: (u64, f64),
+    ) -> Bar {
+        Bar {
+            order_flow: Some(OrderFlow {
+                trades: flow.0,
+                taker_buy_volume: flow.1,
+            }),
+            ..bar(open_time, o, h, l, c, volume)
         }
     }
 
@@ -254,6 +321,98 @@ mod tests {
             }
         ));
         fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn round_trips_order_flow_through_eight_column_file() {
+        let path = temp_path("roundtrip_flow.txt");
+        let bars = vec![
+            bar_with_flow(
+                1_704_067_200_000,
+                "42000",
+                "42050",
+                "41980",
+                "42020",
+                12.345,
+                (150, 6.0),
+            ),
+            bar_with_flow(
+                1_704_067_260_000,
+                "42020",
+                "42100",
+                "42000",
+                "42080",
+                15.678,
+                (200, 8.0),
+            ),
+        ];
+
+        write_bars_file(&bars, &path).unwrap();
+        let read_back = read_bars_file(&path).unwrap();
+
+        assert_eq!(read_back, bars);
+        assert_eq!(
+            format_bars(&bars)
+                .lines()
+                .next()
+                .unwrap()
+                .split(',')
+                .count(),
+            8
+        );
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn mixed_field_counts_in_one_file_is_rejected() {
+        let path = temp_path("mixed.txt");
+        fs::write(
+            &path,
+            "1704067200000,42000,42050,41980,42020,12.345,150,6.0\n\
+             1704067260000,42020,42100,42000,42080,15.678\n",
+        )
+        .unwrap();
+
+        let err = read_bars_file(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            BarStoreError::WrongFieldCount { line: 2, found: 6 }
+        ));
+        fs::remove_file(&path).ok();
+    }
+
+    /// 跟上面相反的方向：第一行先定出 6 欄，第二行卻是 8 欄——一樣要擋，不能因為
+    /// 「多出來的欄位」看起來無害就放過。
+    #[test]
+    fn mixed_field_counts_six_then_eight_is_rejected() {
+        let path = temp_path("mixed_six_then_eight.txt");
+        fs::write(
+            &path,
+            "1704067200000,42000,42050,41980,42020,12.345\n\
+             1704067260000,42020,42100,42000,42080,15.678,150,6.0\n",
+        )
+        .unwrap();
+
+        let err = read_bars_file(&path).unwrap_err();
+        assert!(matches!(
+            err,
+            BarStoreError::WrongFieldCount { line: 2, found: 8 }
+        ));
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn all_none_order_flow_writes_six_columns() {
+        let bars = vec![bar(1_704_067_200_000, "1", "1", "1", "1", 0.0)];
+        assert_eq!(
+            format_bars(&bars)
+                .lines()
+                .next()
+                .unwrap()
+                .split(',')
+                .count(),
+            6
+        );
     }
 
     #[test]

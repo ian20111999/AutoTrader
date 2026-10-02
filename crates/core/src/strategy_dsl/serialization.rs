@@ -167,6 +167,20 @@ fn an_unknown_field_is_rejected() {
 }
 
 #[test]
+fn order_flow_price_field_names_are_locked() {
+    for (field, json_name) in [
+        (PriceField::Trades, "trades"),
+        (PriceField::TakerBuyRatio, "taker_buy_ratio"),
+    ] {
+        let expr = Expr::Price { field, offset: 0 };
+        let text = serde_json::to_string(&expr).unwrap();
+        assert_eq!(text, format!(r#"{{"kind":"price","field":"{json_name}"}}"#));
+        let back: Expr = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, expr);
+    }
+}
+
+#[test]
 fn a_bad_price_field_name_is_rejected() {
     let parsed: Result<Expr, _> = serde_json::from_str(r#"{"kind":"price","field":"Close"}"#);
     assert!(parsed.is_err(), "欄位名大小寫不同就是不同的東西");

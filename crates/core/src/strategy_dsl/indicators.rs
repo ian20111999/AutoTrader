@@ -305,6 +305,7 @@ mod tests {
             low: fx(low),
             close: fx(close),
             volume: 1.0,
+            order_flow: None,
         }
     }
 
@@ -494,6 +495,7 @@ mod tests {
                 low: tiny,
                 close,
                 volume: 1.0,
+                order_flow: None,
             };
             atr.push(&extreme);
             macd.push(close);

@@ -335,6 +335,7 @@ pub struct CustomStrategy {
     long_held: bool,
     short_held: bool,
     warmup: usize,
+    needs_order_flow: bool,
 }
 
 impl CustomStrategy {
@@ -343,6 +344,15 @@ impl CustomStrategy {
         let states = nodes.iter().map(NodeState::for_node).collect();
         let values = vec![Value::Num(None); nodes.len()];
         let warmup = root_warmup(&nodes, &roots);
+        let needs_order_flow = nodes.iter().any(|node| {
+            matches!(
+                node,
+                Node::Price {
+                    field: PriceField::Trades | PriceField::TakerBuyRatio,
+                    ..
+                }
+            )
+        });
         CustomStrategy {
             nodes,
             states,
@@ -352,6 +362,7 @@ impl CustomStrategy {
             long_held: false,
             short_held: false,
             warmup,
+            needs_order_flow,
         }
     }
 
@@ -403,6 +414,10 @@ impl Strategy for CustomStrategy {
 
     fn warmup_bars(&self) -> usize {
         self.warmup
+    }
+
+    fn needs_order_flow(&self) -> bool {
+        self.needs_order_flow
     }
 }
 
@@ -607,6 +622,20 @@ fn price_field(bar: &Bar, field: PriceField) -> Option<Fixed> {
         PriceField::Low => Some(bar.low),
         PriceField::Close => Some(bar.close),
         PriceField::Volume => volume_to_fixed(bar.volume),
+        PriceField::Trades => {
+            let flow = bar.order_flow?;
+            let trades = i64::try_from(flow.trades).ok()?;
+            Fixed::from_int(trades)
+        }
+        PriceField::TakerBuyRatio => {
+            let flow = bar.order_flow?;
+            if bar.volume <= 0.0 || bar.volume.is_nan() {
+                // `volume == 0`（或 NaN，理論上不會發生，`Bar::validate` 已擋）：
+                // 分母為 0，「主動買盤佔比」無法判定，不是 0。
+                return None;
+            }
+            volume_to_fixed(flow.taker_buy_volume / bar.volume)
+        }
     }
 }
 

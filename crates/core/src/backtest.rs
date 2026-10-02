@@ -679,6 +679,7 @@ mod tests {
                     low: close,
                     close,
                     volume: 1.0,
+                    order_flow: None,
                 }
             })
             .collect()
@@ -707,6 +708,7 @@ mod tests {
                     low: open.min(close),
                     close,
                     volume: 1.0,
+                    order_flow: None,
                 }
             })
             .collect()

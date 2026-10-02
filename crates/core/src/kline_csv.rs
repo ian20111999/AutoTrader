@@ -9,10 +9,12 @@
 //! taker_buy_base_asset_volume, taker_buy_quote_asset_volume, ignore
 //! ```
 //!
-//! 這裡只用前 6 欄建 `Bar`；其餘欄位目前 `Bar` 沒地方放，先不管
-//! （成交筆數、吃單量之後真的要用時再加）。
+//! 除了前 6 欄（開高低收量＋開盤時間）以外，也讀第 9 欄（成交筆數）與
+//! 第 10 欄（主動買方成交量，基礎幣計）組成 `OrderFlow`。
+//! 不收報價幣成交額（第 8、11 欄）與 `ignore`（第 12 欄）：
+//! 理由見 `docs/architecture/2026-10-02-bar-order-flow-fields.md` §4。
 
-use crate::bar::{Bar, BarError};
+use crate::bar::{Bar, BarError, OrderFlow};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -79,6 +81,10 @@ fn parse_line(line: &str, line_no: usize) -> Result<Bar, KlineCsvError> {
         low: parse_field(fields[3], line_no, "low")?,
         close: parse_field(fields[4], line_no, "close")?,
         volume: parse_field(fields[5], line_no, "volume")?,
+        order_flow: Some(OrderFlow {
+            trades: parse_field(fields[8], line_no, "number_of_trades")?,
+            taker_buy_volume: parse_field(fields[9], line_no, "taker_buy_base_asset_volume")?,
+        }),
     };
     bar.validate().map_err(|source| KlineCsvError::InvalidBar {
         line: line_no,
@@ -133,6 +139,10 @@ mod tests {
                 low: fx("4.15060000"),
                 close: fx("4.15540000"),
                 volume: 539.23,
+                order_flow: Some(OrderFlow {
+                    trades: 13,
+                    taker_buy_volume: 401.82,
+                }),
             }]
         );
     }

@@ -130,6 +130,19 @@ impl WarmupBars {
         self.len() >= strategy.warmup_bars()
     }
 
+    /// 這段暖機資料有沒有訂單流（成交筆數／主動買盤量）。
+    ///
+    /// 只看第一根就夠：同一個資料來源（REST API 或本機檔案）不會中途變換格式
+    /// （`bar_store` 的規則 2 已經保證本機檔案同檔不混欄數）。空陣列視為
+    /// 「有」——沒有暖機資料不代表之後的即時行情沒有訂單流，呼叫端不該用它
+    /// 擋下一個根本不需要暖機的策略。
+    pub fn has_order_flow(&self) -> bool {
+        match self.0.first() {
+            Some(bar) => bar.order_flow.is_some(),
+            None => true,
+        }
+    }
+
     /// 依序餵給策略，**丟棄每一根產生的目標部位**，回傳最後一根的開盤時間。
     ///
     /// 回傳值就是呼叫端要用的分水嶺：即時行情裡開盤時間**小於或等於**它的
@@ -167,6 +180,7 @@ mod tests {
             low: close,
             close,
             volume: 1.0,
+            order_flow: None,
         }
     }
 

@@ -47,6 +47,13 @@ pub fn fetch(
             need = strategy.warmup_bars(),
         ));
     }
+    if strategy.needs_order_flow() && !warmup.has_order_flow() {
+        return Err(
+            "這支策略用到訂單流（成交筆數／主動買盤佔比），但暖機抓到的歷史 K 線\
+             沒有這個資料。請確認交易所回應格式沒有變化後重試"
+                .to_string(),
+        );
+    }
     Ok(warmup)
 }
 
