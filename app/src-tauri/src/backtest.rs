@@ -178,6 +178,28 @@ pub(crate) fn build_strategy(
                 .map_err(|e| format!("RSI 參數錯誤：{e}"))?;
             Ok(Box::new(strategy))
         }
+        "vegas_tunnel" => {
+            let tunnel_fast = parse_usize(params, "tunnelFastPeriod")?;
+            let tunnel_slow = parse_usize(params, "tunnelSlowPeriod")?;
+            let filter = parse_usize(params, "filterPeriod")?;
+            let strategy = at_core::VegasTunnel::new(tunnel_fast, tunnel_slow, filter)
+                .map_err(|e| format!("維加斯通道參數錯誤：{e}"))?;
+            Ok(Box::new(strategy))
+        }
+        "order_flow_breakout" => {
+            let period = parse_usize(params, "period")?;
+            let threshold = parse_fixed(params, "takerBuyThreshold")?;
+            let strategy = at_core::OrderFlowBreakout::new(period, threshold)
+                .map_err(|e| format!("訂單流確認突破參數錯誤：{e}"))?;
+            Ok(Box::new(strategy))
+        }
+        "taker_buy_momentum" => {
+            let streak = parse_usize(params, "streak")?;
+            let threshold = parse_fixed(params, "takerBuyThreshold")?;
+            let strategy = at_core::TakerBuyMomentum::new(streak, threshold)
+                .map_err(|e| format!("主動買盤動能參數錯誤：{e}"))?;
+            Ok(Box::new(strategy))
+        }
         other => Err(format!("不支援的策略代號：{other}")),
     }
 }
@@ -1363,6 +1385,90 @@ mod tests {
             .expect_err("策略需要訂單流但資料沒有，必須回錯誤，不能回一份看起來正常的回測結果");
         assert!(err.contains("訂單流"), "{err}");
         assert!(err.contains("6 欄"), "{err}");
+    }
+
+    /// 把合成 K 線補上訂單流，讓需要訂單流的策略跑得起來。
+    /// `taker_ratio` 是主動買盤佔比（0～1）。
+    fn with_order_flow(bars: &[Bar], taker_ratio: f64) -> Vec<Bar> {
+        bars.iter()
+            .map(|bar| {
+                let mut bar = *bar;
+                bar.volume = 100.0;
+                bar.order_flow = Some(at_core::OrderFlow {
+                    trades: 10,
+                    taker_buy_volume: 100.0 * taker_ratio,
+                });
+                bar
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vegas_tunnel_runs_a_real_backtest_through_the_builtin_lookup() {
+        // 新增的內建策略要真的從「策略代號 + 參數」一路跑完回測，不是只有
+        // 清單列得出來。週期縮小成 6/7/5，合成 K 線只有 32 根也跑得出曲線。
+        let bars = trending_bars();
+        let req = request(
+            "vegas_tunnel",
+            &[
+                ("tunnelFastPeriod", "6"),
+                ("tunnelSlowPeriod", "7"),
+                ("filterPeriod", "5"),
+            ],
+            "10000",
+        );
+
+        let summary = summarize(&bars, &req, Path::new("/tmp/fake.csv")).unwrap();
+
+        assert_eq!(summary.strategy_id, "vegas_tunnel");
+        assert_eq!(summary.strategy_name, "維加斯通道");
+        assert_eq!(summary.bar_count, bars.len());
+        // 一路上漲的行情，通道突破策略應該至少開過一次倉
+        assert!(summary.trades >= 1, "trades = {}", summary.trades);
+    }
+
+    #[test]
+    fn order_flow_strategies_run_when_the_bars_carry_order_flow() {
+        // 有訂單流的資料：載入端的檢查放行，策略照主動買盤佔比出訊號。
+        let bars = with_order_flow(&trending_bars(), 0.75);
+        for (id, params) in [
+            ("order_flow_breakout", vec![("period", "3")]),
+            ("taker_buy_momentum", vec![("streak", "3")]),
+        ] {
+            let mut params = params;
+            params.push(("takerBuyThreshold", "0.55"));
+            let req = request(id, &params, "10000");
+            let summary = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+                .unwrap_or_else(|e| panic!("{id} 應該跑得完：{e}"));
+            assert_eq!(summary.strategy_id, id);
+            assert_eq!(summary.bar_count, bars.len());
+            // 佔比固定 0.75 > 0.55，一路上漲 → 兩支策略都該進場
+            assert!(summary.trades >= 1, "{id} 的 trades = {}", summary.trades);
+        }
+    }
+
+    #[test]
+    fn order_flow_strategies_on_old_format_bars_are_blocked_before_the_backtest_runs() {
+        // 和 DSL 自訂策略同一條守門規則：策略宣告 needs_order_flow()、資料是
+        // 6 欄舊格式 → 清楚的錯誤，不是一場零交易的回測。
+        let bars = trending_bars();
+        assert!(bars.iter().all(|b| b.order_flow.is_none()));
+        for (id, params) in [
+            (
+                "order_flow_breakout",
+                vec![("period", "3"), ("takerBuyThreshold", "0.55")],
+            ),
+            (
+                "taker_buy_momentum",
+                vec![("streak", "3"), ("takerBuyThreshold", "0.55")],
+            ),
+        ] {
+            let req = request(id, &params, "10000");
+            let err = summarize(&bars, &req, Path::new("/tmp/fake.csv"))
+                .expect_err("需要訂單流但資料沒有，必須回錯誤");
+            assert!(err.contains("訂單流"), "{id}: {err}");
+            assert!(err.contains("6 欄"), "{id}: {err}");
+        }
     }
 
     #[test]

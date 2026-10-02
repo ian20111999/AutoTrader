@@ -30,7 +30,10 @@ pub use fixed::{Fixed, ParseFixedError};
 pub use kline_csv::{parse_klines_csv, read_klines_csv, KlineCsvError};
 pub use metrics::{Metrics, MS_PER_YEAR};
 pub use rules::{RuleViolation, RulesError, SymbolRules};
-pub use strategies::{Bollinger, Donchian, Rsi, SmaCross, StrategyParamError};
+pub use strategies::{
+    Bollinger, Donchian, OrderFlowBreakout, Rsi, SmaCross, StrategyParamError, TakerBuyMomentum,
+    VegasTunnel,
+};
 pub use strategy::{DirectionMode, LeveragedStrategy, Strategy, TargetPosition};
 pub use strategy_dsl::{Cond, CustomStrategy, DslError, Expr, StrategyAst};
 pub use types::{Liquidity, Market, RunMode, Side, Symbol, SymbolError};

@@ -1,4 +1,4 @@
-//! 四個內建策略，以及它們共用的零件。
+//! 內建策略，以及它們共用的零件。
 //!
 //! 每個策略都照 [`Strategy`](crate::strategy::Strategy) 的契約寫：
 //! K 線一根一根餵進來，策略自己維護 rolling window，
@@ -11,9 +11,19 @@
 //! | 布林通道 | [`Bollinger`] | 收盤跌破下軌 | 收盤回到中軌之上 | 20 根 / 2 倍 |
 //! | 唐奇安突破 | [`Donchian`] | 收盤突破前 N 根最高價 | 收盤跌破前 M 根最低價 | 20 / 10 |
 //! | RSI | [`Rsi`] | RSI ≤ 進場門檻 | RSI ≥ 出場門檻 | 14 / 30 / 70 |
+//! | 維加斯通道 | [`VegasTunnel`] | 收盤與過濾均線同時站上通道 | 兩者同時跌破通道 | 144 / 169 / 12 |
+//! | 訂單流確認突破 | [`OrderFlowBreakout`] | 突破前 N 根高點且主動買盤佔比夠高 | 跌破前 N 根低點且主動賣盤佔比夠高 | 20 根 / 0.55 |
+//! | 主動買盤動能 | [`TakerBuyMomentum`] | 連續 N 根主動買盤佔比超過門檻 | 連續 N 根低於 1 − 門檻 | 3 根 / 0.6 |
 //!
-//! 四個都只**做多或空手**（現貨用得到的範圍）。
-//! 介面本身支援做空（負數比例），等 2.5 合約做完再決定要不要加反手版本。
+//! 全部都只**做多或空手**（現貨用得到的範圍）。空頭訊號一律表達成「出場」，
+//! 而不是回傳負的目標部位：
+//!
+//! - 現貨不能做空，而 [`LeveragedStrategy`](crate::strategy::LeveragedStrategy)
+//!   的「只做多」模式**不會**把內層策略回傳的負部位夾回 0（它只處理「空手要不要
+//!   鏡像成做空」）。內建策略自己永遠不回傳負數，現貨就在型別上不可能送出賣空單。
+//! - 真的要反手做空，是在回測／模擬頁把方向設成「多空」，由
+//!   [`LeveragedStrategy`] 把空手鏡像成反向部位——做不做空是帳戶層的風險設定，
+//!   不是策略邏輯本身（理由見 [`crate::strategy`] 的模組說明）。
 //!
 //! ## 為什麼指標也全部用 `Fixed` 算，不用 `f64`
 //!
@@ -27,14 +37,21 @@
 
 mod bollinger;
 mod donchian;
+mod order_flow_breakout;
 mod rsi;
 mod sma_cross;
+mod taker_buy_momentum;
+mod vegas_tunnel;
 
 pub use bollinger::Bollinger;
 pub use donchian::Donchian;
+pub use order_flow_breakout::OrderFlowBreakout;
 pub use rsi::Rsi;
 pub use sma_cross::SmaCross;
+pub use taker_buy_momentum::TakerBuyMomentum;
+pub use vegas_tunnel::VegasTunnel;
 
+use crate::bar::Bar;
 use crate::fixed::{isqrt, Fixed};
 use std::collections::VecDeque;
 use std::fmt;
@@ -55,6 +72,13 @@ pub enum StrategyParamError {
     ThresholdOutOfRange,
     /// RSI 的進場門檻沒有低於出場門檻。
     ThresholdsOutOfOrder,
+    /// 主動買盤佔比門檻不在 0.5～1 之間。
+    ///
+    /// 下限是 0.5 而不是 0：訂單流那兩支策略的做多條件是「佔比 > 門檻」、
+    /// 出場條件是「佔比 < 1 − 門檻」。門檻低於 0.5 時 `1 − 門檻 > 門檻`，
+    /// 兩個條件會同時成立，策略的行為就變成「看程式碼先判斷哪一個」——
+    /// 那是看不出來的陷阱，不如在建構子就擋掉。
+    TakerRatioOutOfRange,
 }
 
 impl fmt::Display for StrategyParamError {
@@ -65,6 +89,9 @@ impl fmt::Display for StrategyParamError {
             StrategyParamError::NonPositiveMultiplier => write!(f, "標準差倍數必須大於 0"),
             StrategyParamError::ThresholdOutOfRange => write!(f, "RSI 門檻必須在 0 到 100 之間"),
             StrategyParamError::ThresholdsOutOfOrder => write!(f, "RSI 進場門檻必須低於出場門檻"),
+            StrategyParamError::TakerRatioOutOfRange => {
+                write!(f, "主動買盤佔比門檻必須在 0.5 到 1 之間")
+            }
         }
     }
 }
@@ -182,9 +209,61 @@ fn non_zero(period: usize) -> Result<usize, StrategyParamError> {
     Ok(period)
 }
 
+/// 主動買盤佔比門檻的下限（0.5）。
+const HALF: Fixed = Fixed::from_raw(Fixed::SCALE / 2);
+
+/// 擋掉不在 0.5～1 之間的主動買盤佔比門檻，並順便算出對應的賣方門檻
+/// （`1 − 門檻`），讓兩支訂單流策略不必各自再減一次。
+///
+/// 回傳 `(買方門檻, 賣方門檻)`。`threshold ≤ 1` 已經檢查過，所以相減不會失敗。
+fn taker_ratio_thresholds(threshold: Fixed) -> Result<(Fixed, Fixed), StrategyParamError> {
+    if threshold < HALF || threshold > Fixed::ONE {
+        return Err(StrategyParamError::TakerRatioOutOfRange);
+    }
+    let sell_below = Fixed::ONE
+        .checked_sub(threshold)
+        .ok_or(StrategyParamError::TakerRatioOutOfRange)?;
+    Ok((threshold, sell_below))
+}
+
+/// 這根 K 線的**主動買盤佔比**：`taker_buy_volume ÷ volume`，落在 0～1。
+///
+/// 1 表示這根 K 線的成交全部由主動買方（吃單買進）促成，0 表示全部由主動賣方
+/// 促成，0.5 表示買賣雙方的主動量相等。
+///
+/// 回傳 `None` 的兩種情況——策略一律當成「這根沒有新訊號」，而不是當成 0：
+///
+/// - `order_flow` 是 `None`：**資料來源沒有提供**這個欄位（6 欄的舊格式本機檔、
+///   合成的測試 K 線），不代表沒有主動買盤。
+/// - `volume` 是 0（或 NaN）：分母為 0，佔比在數學上無法判定。把它當成 0 會被
+///   誤讀成「全是賣壓」而觸發出場訊號。
+///
+/// ## 為什麼轉成 `Fixed` 才比較
+///
+/// `taker_buy_volume` 與 `volume` 本身是 `f64`（架構文件的決定：它們只用來產生
+/// 訊號與統計，不參與下單數量計算）。但門檻是使用者從介面輸入的 `Fixed`，
+/// 比較放在 `Fixed` 域裡做（截尾，不四捨五入），同一份輸入永遠得到同一個訊號
+/// ——理由同本模組開頭對 `f64` 的說明。DSL 的 `taker_buy_ratio` 欄位算的是同一個
+/// 量、也同樣在 `Fixed` 域裡比較，兩邊不會各走一套精度。
+///
+/// [`Bar::validate`] 保證 `0 ≤ taker_buy_volume ≤ volume`，所以商落在 0～1，
+/// 乘上 [`Fixed::SCALE`] 之後最多 10⁸，**不可能溢位 `i64`**——這裡不需要
+/// `checked_*`，因為沒有可能失敗的運算。
+pub(crate) fn taker_buy_ratio(bar: &Bar) -> Option<Fixed> {
+    let flow = bar.order_flow?;
+    if bar.volume <= 0.0 || bar.volume.is_nan() {
+        return None;
+    }
+    let ratio = flow.taker_buy_volume / bar.volume;
+    if !ratio.is_finite() {
+        return None;
+    }
+    Some(Fixed::from_raw((ratio * Fixed::SCALE as f64) as i64))
+}
+
 #[cfg(test)]
 pub(crate) mod test_util {
-    use crate::bar::Bar;
+    use crate::bar::{Bar, OrderFlow};
     use crate::fixed::Fixed;
     use crate::strategy::{Strategy, TargetPosition};
 
@@ -224,6 +303,34 @@ pub(crate) mod test_util {
         };
         assert_eq!(bar.validate(), Ok(()), "測試資料本身要是合理的 K 線");
         bar
+    }
+
+    /// 給既有的 K 線加上訂單流：`ratios[i]` 是第 i 根的主動買盤佔比，
+    /// `None` 代表**這根沒有訂單流資料**（來源是 6 欄的舊格式）。
+    ///
+    /// 和 [`closes`]／[`highs_lows_closes`] 組合使用，不另外寫一個欄位更多的
+    /// K 線建構子：價格走勢和訂單流是兩件獨立的事，分開寫測試才看得懂。
+    /// 成交量固定 100，所以佔比 0.75 就是主動買方量 75。
+    ///
+    /// **佔比請用二進位表示得出來的數字**（0.5、0.25、0.75、0.625、0.125…）。
+    /// 佔比是 `taker_buy_volume / volume` 兩個 `f64` 相除、再截尾成 `Fixed`，
+    /// 像 0.6 這種在二進位下無限循環的值會變成 `0.59999999`，讓「剛好等於門檻」
+    /// 這類邊界斷言變得很脆。二進位整除的值轉換是精確的，邊界測得準。
+    pub(crate) fn with_taker_ratios(bars: &[Bar], ratios: &[Option<f64>]) -> Vec<Bar> {
+        assert_eq!(bars.len(), ratios.len(), "每一根 K 線都要指定主動買盤佔比");
+        bars.iter()
+            .zip(ratios)
+            .map(|(bar, ratio)| {
+                let mut bar = *bar;
+                bar.volume = 100.0;
+                bar.order_flow = ratio.map(|r| OrderFlow {
+                    trades: 10,
+                    taker_buy_volume: 100.0 * r,
+                });
+                assert_eq!(bar.validate(), Ok(()), "測試資料本身要是合理的 K 線");
+                bar
+            })
+            .collect()
     }
 
     /// 把 K 線餵進策略，把每根的訊號縮寫成一個字元：

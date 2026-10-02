@@ -30,6 +30,11 @@ function fieldSemanticError(strategyId: string, key: string, raw: string): strin
   if (strategyId === "rsi" && (key === "buyBelow" || key === "exitAbove")) {
     if (value < 0 || value > 100) return "RSI 門檻必須在 0 到 100 之間";
   }
+  // 訂單流確認突破與主動買盤動能共用這個參數 key，規則也一樣（對應
+  // at_core 的 StrategyParamError::TakerRatioOutOfRange），所以不逐個策略列。
+  if (key === "takerBuyThreshold" && (value < 0.5 || value > 1)) {
+    return "主動買盤佔比門檻必須在 0.5 到 1 之間";
+  }
   return null;
 }
 

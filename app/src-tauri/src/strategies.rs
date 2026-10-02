@@ -2,7 +2,9 @@
 //! JSON 形狀。這裡只組裝資料，不重新定義策略邏輯或驗證規則——
 //! 參數合法性檢查（`StrategyParamError`）留給 3.5 調參頁面時重用。
 
-use at_core::{Bollinger, Donchian, Rsi, SmaCross};
+use at_core::{
+    Bollinger, Donchian, OrderFlowBreakout, Rsi, SmaCross, TakerBuyMomentum, VegasTunnel,
+};
 use serde::Serialize;
 
 /// 單一參數的型別：決定前端輸入框要用整數還是小數規則（3.5 會用到）。
@@ -50,8 +52,13 @@ fn decimal(key: &str, label: &str, default: at_core::Fixed) -> StrategyParam {
     }
 }
 
-/// 四個內建策略與參數 schema，直接讀 `at_core::strategies` 現有的
+/// 內建策略與參數 schema，直接讀 `at_core::strategies` 現有的
 /// `DEFAULT_*` 常數（`Default` 實作用的就是同一組常數），不在這裡寫死一份。
+///
+/// `label` 是前端「調整參數」表單唯一的說明文字（schema 沒有獨立的 description
+/// 欄位），所以它要寫得讓使用者看得懂這個參數在策略裡扮演什麼角色，而不是
+/// 把程式裡的英文代號翻成中文就算了。策略卡片上的參數摘要是
+/// `label + default` 直接相接，所以 label 裡不重複寫預設值。
 pub fn builtin_strategies() -> Vec<StrategyInfo> {
     vec![
         StrategyInfo {
@@ -87,6 +94,59 @@ pub fn builtin_strategies() -> Vec<StrategyInfo> {
                 decimal("exitAbove", "出場門檻", Rsi::DEFAULT_EXIT_ABOVE),
             ],
         },
+        StrategyInfo {
+            id: "vegas_tunnel".to_string(),
+            name: "維加斯通道".to_string(),
+            params: vec![
+                integer(
+                    "tunnelFastPeriod",
+                    "通道快線 EMA 週期",
+                    VegasTunnel::DEFAULT_TUNNEL_FAST,
+                ),
+                integer(
+                    "tunnelSlowPeriod",
+                    "通道慢線 EMA 週期",
+                    VegasTunnel::DEFAULT_TUNNEL_SLOW,
+                ),
+                integer(
+                    "filterPeriod",
+                    "確認突破的過濾 EMA 週期",
+                    VegasTunnel::DEFAULT_FILTER,
+                ),
+            ],
+        },
+        StrategyInfo {
+            id: "order_flow_breakout".to_string(),
+            name: "訂單流確認突破".to_string(),
+            params: vec![
+                integer(
+                    "period",
+                    "突破要回看幾根 K 線",
+                    OrderFlowBreakout::DEFAULT_PERIOD,
+                ),
+                decimal(
+                    "takerBuyThreshold",
+                    "確認用的主動買盤佔比門檻",
+                    OrderFlowBreakout::DEFAULT_TAKER_BUY_THRESHOLD,
+                ),
+            ],
+        },
+        StrategyInfo {
+            id: "taker_buy_momentum".to_string(),
+            name: "主動買盤動能".to_string(),
+            params: vec![
+                integer(
+                    "streak",
+                    "要連續幾根同方向",
+                    TakerBuyMomentum::DEFAULT_STREAK,
+                ),
+                decimal(
+                    "takerBuyThreshold",
+                    "做多要求的主動買盤佔比門檻",
+                    TakerBuyMomentum::DEFAULT_TAKER_BUY_THRESHOLD,
+                ),
+            ],
+        },
     ]
 }
 
@@ -95,10 +155,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_all_four_builtin_strategies() {
+    fn lists_every_builtin_strategy() {
         let strategies = builtin_strategies();
         let ids: Vec<&str> = strategies.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["sma_cross", "bollinger", "donchian", "rsi"]);
+        assert_eq!(
+            ids,
+            [
+                "sma_cross",
+                "bollinger",
+                "donchian",
+                "rsi",
+                "vegas_tunnel",
+                "order_flow_breakout",
+                "taker_buy_momentum",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_listed_strategy_can_actually_be_built_with_its_own_defaults() {
+        // 策略庫列得出來、按下去卻跑不起來（參數 key 打錯、少一個欄位）是
+        // 使用者看得到的壞掉。這個測試把「清單」和 `build_strategy` 的查表
+        // 綁在一起，兩邊只要對不上就紅。
+        for info in builtin_strategies() {
+            let params: std::collections::HashMap<String, String> = info
+                .params
+                .iter()
+                .map(|p| (p.key.clone(), p.default.clone()))
+                .collect();
+            assert!(
+                crate::backtest::build_strategy(&info.id, &params).is_ok(),
+                "{} 的預設參數建不出策略",
+                info.id
+            );
+        }
+    }
+
+    #[test]
+    fn vegas_tunnel_params_match_at_core_defaults() {
+        let vegas = &builtin_strategies()[4];
+        assert_eq!(vegas.name, "維加斯通道");
+        assert_eq!(vegas.params[0].key, "tunnelFastPeriod");
+        assert_eq!(vegas.params[0].default, "144");
+        assert_eq!(vegas.params[1].key, "tunnelSlowPeriod");
+        assert_eq!(vegas.params[1].default, "169");
+        assert_eq!(vegas.params[2].key, "filterPeriod");
+        assert_eq!(vegas.params[2].default, "12");
+    }
+
+    #[test]
+    fn order_flow_strategy_params_match_at_core_defaults() {
+        let breakout = &builtin_strategies()[5];
+        assert_eq!(breakout.name, "訂單流確認突破");
+        assert_eq!(breakout.params[0].default, "20");
+        assert_eq!(breakout.params[0].kind, ParamKind::Integer);
+        assert_eq!(breakout.params[1].key, "takerBuyThreshold");
+        assert_eq!(breakout.params[1].default, "0.55");
+        assert_eq!(breakout.params[1].kind, ParamKind::Decimal);
+
+        let momentum = &builtin_strategies()[6];
+        assert_eq!(momentum.name, "主動買盤動能");
+        assert_eq!(momentum.params[0].key, "streak");
+        assert_eq!(momentum.params[0].default, "3");
+        assert_eq!(momentum.params[1].default, "0.6");
+    }
+
+    #[test]
+    fn every_param_label_is_chinese_not_just_the_english_key() {
+        // 「調整參數」表單只有 label 這一個說明文字，所以它不能是英文代號
+        for info in builtin_strategies() {
+            for param in &info.params {
+                assert!(
+                    !param.label.is_ascii(),
+                    "{}／{} 的 label 沒有中文說明：{}",
+                    info.id,
+                    param.key,
+                    param.label
+                );
+            }
+        }
     }
 
     #[test]

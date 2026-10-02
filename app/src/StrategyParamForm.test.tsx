@@ -31,6 +31,20 @@ const RSI: StrategyInfo = {
   ],
 };
 
+const ORDER_FLOW_BREAKOUT: StrategyInfo = {
+  id: "order_flow_breakout",
+  name: "訂單流確認突破",
+  params: [
+    { key: "period", label: "突破要回看幾根 K 線", kind: "integer", default: "20" },
+    {
+      key: "takerBuyThreshold",
+      label: "確認用的主動買盤佔比門檻",
+      kind: "decimal",
+      default: "0.55",
+    },
+  ],
+};
+
 function defaultValuesOf(strategy: StrategyInfo): Record<string, string> {
   return Object.fromEntries(strategy.params.map((p) => [p.key, p.default]));
 }
@@ -169,6 +183,51 @@ describe("StrategyParamForm", () => {
 
     expect(onApply).not.toHaveBeenCalled();
     expect(screen.getByText("RSI 進場門檻必須低於出場門檻")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["低於 0.5", "0.4"],
+    ["高於 1", "1.2"],
+  ])(
+    "訂單流策略：主動買盤佔比門檻%s時顯示錯誤（對應 Rust 端同一條規則）",
+    (_label, badValue) => {
+      const onApply = vi.fn();
+      render(
+        <StrategyParamForm
+          strategy={ORDER_FLOW_BREAKOUT}
+          initialValues={defaultValuesOf(ORDER_FLOW_BREAKOUT)}
+          onApply={onApply}
+          onCancel={vi.fn()}
+        />,
+      );
+
+      fireEvent.change(screen.getByLabelText("確認用的主動買盤佔比門檻"), {
+        target: { value: badValue },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "套用參數" }));
+
+      expect(onApply).not.toHaveBeenCalled();
+      expect(screen.getByText("主動買盤佔比門檻必須在 0.5 到 1 之間")).toBeInTheDocument();
+    },
+  );
+
+  it("訂單流策略：0.5～1 之間的門檻會被接受", () => {
+    const onApply = vi.fn();
+    render(
+      <StrategyParamForm
+        strategy={ORDER_FLOW_BREAKOUT}
+        initialValues={defaultValuesOf(ORDER_FLOW_BREAKOUT)}
+        onApply={onApply}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("確認用的主動買盤佔比門檻"), {
+      target: { value: "0.7" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "套用參數" }));
+
+    expect(onApply).toHaveBeenCalledWith({ period: "20", takerBuyThreshold: "0.7" });
   });
 
   it("點「返回策略庫」呼叫 onCancel", () => {
