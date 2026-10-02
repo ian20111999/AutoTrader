@@ -13,6 +13,7 @@ use std::str::FromStr;
 /// K 線週期。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Interval {
+    S1,
     M1,
     M5,
     M15,
@@ -29,7 +30,7 @@ impl fmt::Display for ParseIntervalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "不支援的週期：{:?}（可用：1m、5m、15m、1h、4h、1d；注意大寫 1M 是一個月）",
+            "不支援的週期：{:?}（可用：1s、1m、5m、15m、1h、4h、1d；注意大寫 1M 是一個月）",
             self.0
         )
     }
@@ -38,7 +39,8 @@ impl fmt::Display for ParseIntervalError {
 impl std::error::Error for ParseIntervalError {}
 
 impl Interval {
-    pub const ALL: [Interval; 6] = [
+    pub const ALL: [Interval; 7] = [
+        Interval::S1,
         Interval::M1,
         Interval::M5,
         Interval::M15,
@@ -49,8 +51,10 @@ impl Interval {
 
     /// 一根 K 線有幾毫秒。
     pub const fn millis(self) -> i64 {
-        const MIN: i64 = 60_000;
+        const SEC: i64 = 1_000;
+        const MIN: i64 = 60 * SEC;
         match self {
+            Interval::S1 => SEC,
             Interval::M1 => MIN,
             Interval::M5 => 5 * MIN,
             Interval::M15 => 15 * MIN,
@@ -63,6 +67,7 @@ impl Interval {
     /// Binance 使用的代號，例如 `"4h"`。
     pub const fn as_str(self) -> &'static str {
         match self {
+            Interval::S1 => "1s",
             Interval::M1 => "1m",
             Interval::M5 => "5m",
             Interval::M15 => "15m",
@@ -262,6 +267,7 @@ mod tests {
 
     #[test]
     fn interval_millis() {
+        assert_eq!(Interval::S1.millis(), 1_000);
         assert_eq!(Interval::M1.millis(), 60_000);
         assert_eq!(Interval::H4.millis(), 14_400_000);
         assert_eq!(Interval::D1.millis(), 86_400_000);

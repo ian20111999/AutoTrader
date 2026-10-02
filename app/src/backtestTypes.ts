@@ -67,8 +67,8 @@ export interface BacktestSummary {
   dataSourcePath: string;
 }
 
-// at_core::Interval 支援的六個週期，跟 Rust 的 FromStr 一一對應。
-export const INTERVAL_OPTIONS = ["1m", "5m", "15m", "1h", "4h", "1d"] as const;
+// at_core::Interval 支援的七個週期，跟 Rust 的 FromStr 一一對應。
+export const INTERVAL_OPTIONS = ["1s", "1m", "5m", "15m", "1h", "4h", "1d"] as const;
 export type IntervalOption = (typeof INTERVAL_OPTIONS)[number];
 
 // 跟 app/src-tauri/src/backtest.rs 的 ParameterSweepAxis/Request/Cell/Result 對應

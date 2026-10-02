@@ -444,6 +444,7 @@ mod tests {
         assert_eq!(ticker_stream("BTCUSDT"), "btcusdt@ticker");
         assert_eq!(kline_stream("BTCUSDT", Interval::M1), "btcusdt@kline_1m");
         assert_eq!(kline_stream("ethusdt", Interval::H4), "ethusdt@kline_4h");
+        assert_eq!(kline_stream("BTCUSDT", Interval::S1), "btcusdt@kline_1s");
     }
 
     // ---- 訊息解析：真實格式的片段（來自 Binance 官方文件範例，欄位補齊）----

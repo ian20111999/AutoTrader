@@ -220,6 +220,31 @@ mod tests {
     }
 
     #[test]
+    fn s1_warmup_math_is_sane_and_does_not_overflow() {
+        // 1 秒週期下根數邏輯跟週期無關（warmup_fetch_count 只看 warmup_bars()），
+        // 但「這些根數要花多久才抓得到」在 1 秒下反而比 1 分鐘短：
+        // SmaCross(10, 30) 宣告 30 根，× 5 安全係數 = 150 根。
+        // 1 分鐘週期下是 150 分鐘（2.5 小時）歷史；1 秒週期下只要 150 秒（2.5 分鐘）。
+        let strategy = SmaCross::new(10, 30).unwrap();
+        let fetch_count = warmup_fetch_count(&strategy);
+        assert_eq!(fetch_count, 150);
+
+        let span_ms = (fetch_count as i64)
+            .checked_mul(Interval::S1.millis())
+            .expect("150 根 1 秒 K 線的毫秒數不會溢位");
+        assert_eq!(span_ms, 150_000, "150 秒，遠比荒謬的歷史長度合理");
+
+        // 內建策略最多宣告 50 根（均線交叉），對應文件 WARMUP_SAFETY_FACTOR 的說明。
+        // 即使拉到最大的均線交叉參數，1 秒週期下也只要幾分鐘歷史，不會因為毫秒數
+        // 暴增而 overflow i64（i64::MAX 遠大於任何合理根數 × 1000）。
+        let worst_case_bars: i64 = 50 * WARMUP_SAFETY_FACTOR as i64;
+        let worst_case_span_ms = worst_case_bars
+            .checked_mul(Interval::S1.millis())
+            .expect("最大內建策略在 1 秒週期下也不會溢位");
+        assert_eq!(worst_case_span_ms, 250_000, "約 4.2 分鐘歷史，體感可接受");
+    }
+
+    #[test]
     fn covers_is_measured_against_the_declared_minimum_not_the_safety_margin() {
         let strategy = SmaCross::new(2, 3).unwrap();
         assert_eq!(strategy.warmup_bars(), 3);

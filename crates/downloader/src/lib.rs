@@ -190,6 +190,41 @@ mod tests {
     }
 
     #[test]
+    fn builds_expected_monthly_url_for_1s_interval() {
+        // 1 秒 K 線歷史資料的 URL 模板跟其他週期完全一樣，只是把 "1m" 換成 "1s"。
+        let url = monthly_kline_url(&sym("BTCUSDT"), Interval::S1, 2024, 1).unwrap();
+        assert_eq!(
+            url,
+            "https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1s/BTCUSDT-1s-2024-01.zip"
+        );
+    }
+
+    #[test]
+    fn local_path_layout_for_1s_interval() {
+        let path = local_path("data", &sym("BTCUSDT"), Interval::S1, 2024, 1);
+        assert_eq!(
+            path,
+            PathBuf::from("data/BTCUSDT/1s/BTCUSDT-1s-2024-01.csv")
+        );
+    }
+
+    /// Binance 開始提供 1 秒歷史資料的時間比 1 分鐘晚，太早的月份會 404。
+    /// 實際打一個鐵定不存在的月份，驗證 `download_monthly_klines` 回清楚的
+    /// `DownloadError::Http`，不是 panic、也不是靜默回傳空陣列。
+    ///
+    /// 需要網路，預設不跑。手動驗證：`cargo test -p at-downloader -- --ignored`
+    #[test]
+    #[ignore]
+    fn a_month_with_no_1s_history_yet_is_reported_as_a_clear_http_error() {
+        // 2019-01 早於 Binance 開始提供 1 秒 K 線歷史資料的時間。
+        let err = download_monthly_klines(&sym("BTCUSDT"), Interval::S1, 2019, 1).unwrap_err();
+        assert!(
+            matches!(err, DownloadError::Http(_)),
+            "找不到的月份要回清楚的 Http 錯誤，不是 panic 或空陣列：{err:?}"
+        );
+    }
+
+    #[test]
     fn month_is_zero_padded() {
         let url = monthly_kline_url(&sym("ETHUSDT"), Interval::H4, 2023, 9).unwrap();
         assert!(url.ends_with("/ETHUSDT-4h-2023-09.zip"));

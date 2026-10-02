@@ -238,6 +238,12 @@ export function Backtest({ strategyConfig, onGoToStrategies, onAddToCompare }: B
                 </option>
               ))}
             </select>
+            {interval === "1s" && (
+              <p className="backtest-form__hint">
+                1 秒 K 線一個月的資料量比 1 分鐘大約多 60 倍，回測可能需要比較久，
+                請耐心等候，畫面沒有當掉。
+              </p>
+            )}
           </div>
 
           <div className="backtest-form__field">
