@@ -138,6 +138,14 @@ impl LeveragedStrategy {
 impl Strategy for LeveragedStrategy {
     fn on_bar(&mut self, bar: &Bar) -> TargetPosition {
         let raw = self.inner.on_bar(bar).ratio();
+        // 只做多模式下，內層策略自己回傳的負部位（目前只有 DSL 自訂策略
+        // 才可能發生，四個內建策略永遠不會）一律視為空手，不能讓它穿透成
+        // 實際送出去的空單——現貨的「只做多」帳戶沒有合法做空這件事，
+        // CLAUDE.md 明文禁止。下面 `!raw.is_zero()` 那個分支本來完全沒看過
+        // `direction`，非零的負部位直接套槓桿送出去，是這裡要補的洞。
+        if self.direction == DirectionMode::LongOnly && raw.is_negative() {
+            return TargetPosition::FLAT;
+        }
         // 內層策略想做多/做空：維持方向、套槓桿。溢位（槓桿設得離譜）寧可空手。
         if !raw.is_zero() {
             return match raw.checked_mul(self.leverage) {
@@ -349,6 +357,36 @@ mod tests {
         let mut flat =
             LeveragedStrategy::new(Box::new(AlwaysFlat), fx("3"), DirectionMode::LongOnly);
         assert_eq!(run(&mut flat, &bars), vec![TargetPosition::FLAT; 3]);
+    }
+
+    /// 回歸測試：內層策略（目前只有 DSL 自訂策略可能這樣）自己回傳負的
+    /// 目標部位時，只做多模式必須把它當空手，不能讓它穿透成實際的空單——
+    /// 現貨的「只做多」帳戶沒有合法做空這件事。`Alternating` 每一根都在
+    /// 滿倉做多跟滿倉做空之間切換，用它確認*每一根*的輸出都不是負的，
+    /// 不是只看第一根。
+    #[test]
+    fn leveraged_long_only_never_lets_an_inner_short_signal_through() {
+        let bars = bars(&["100", "101", "99", "102"]);
+        let mut s = LeveragedStrategy::new(
+            Box::new(Alternating { period: 1, seen: 0 }),
+            fx("2"),
+            DirectionMode::LongOnly,
+        );
+        let positions = run(&mut s, &bars);
+        assert!(
+            positions.iter().all(|p| !p.ratio().is_negative()),
+            "只做多模式下不該有任何一根是負部位：{positions:?}"
+        );
+        // 偶數根（0、2…）原本就是做多訊號，應該正常套槓桿；奇數根被夾成空手。
+        assert_eq!(
+            positions,
+            vec![
+                TargetPosition::new(fx("2")),
+                TargetPosition::FLAT,
+                TargetPosition::new(fx("2")),
+                TargetPosition::FLAT,
+            ]
+        );
     }
 
     #[test]
