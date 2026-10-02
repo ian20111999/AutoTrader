@@ -15,11 +15,21 @@ import {
   type IndicatorName,
   type IndicatorParams,
   type MacdOutput,
+  type PriceField,
   type StrategyAst,
 } from "./strategyDslTypes";
 
 export function defaultExpr(): Expr {
   return { kind: "price", field: "close" };
+}
+
+/**
+ * 這個價格欄位是不是需要 K 線的訂單流資料（成交筆數／主動買盤佔比）。
+ * 用來在積木 UI 顯示「舊資料可能沒有這個欄位」的提示——實際檢查永遠在後端
+ * （`needs_order_flow()` + 載入端硬錯誤），這裡只是提前讓使用者知道。
+ */
+export function needsOrderFlowData(field: PriceField): boolean {
+  return field === "trades" || field === "taker_buy_ratio";
 }
 
 export function defaultParamsFor(name: IndicatorName): IndicatorParams {

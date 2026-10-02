@@ -20,6 +20,7 @@ import {
   indicatorTakesSource,
   loadSavedStrategies,
   mirrorCond,
+  needsOrderFlowData,
   needsOutput,
   outputOptionsFor,
   paramFieldsFor,
@@ -39,6 +40,8 @@ const PRICE_FIELDS: { value: PriceField; label: string }[] = [
   { value: "low", label: "最低價" },
   { value: "close", label: "收盤價" },
   { value: "volume", label: "成交量" },
+  { value: "trades", label: "成交筆數（訂單流）" },
+  { value: "taker_buy_ratio", label: "主動買盤佔比（訂單流）" },
 ];
 
 const INDICATOR_OPTIONS: { value: IndicatorName; label: string }[] = [
@@ -233,6 +236,11 @@ function ExprEditor({
             value={value.offset ?? 0}
             onChange={(offset) => onChange({ ...value, offset })}
           />
+          {needsOrderFlowData(value.field) && (
+            <p className="strategy-editor__hint">
+              需要重新下載過的 K 線資料才有這個欄位；用舊格式資料回測／模擬交易／測試網會在送出時收到錯誤提示。
+            </p>
+          )}
         </>
       )}
 

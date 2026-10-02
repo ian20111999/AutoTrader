@@ -5,8 +5,19 @@ import {
   deleteSavedStrategy,
   loadSavedStrategies,
   mirrorCond,
+  needsOrderFlowData,
   upsertSavedStrategy,
 } from "./strategyEditorModel";
+
+describe("needsOrderFlowData", () => {
+  it("trades／taker_buy_ratio 需要訂單流資料，其餘欄位不需要", () => {
+    expect(needsOrderFlowData("trades")).toBe(true);
+    expect(needsOrderFlowData("taker_buy_ratio")).toBe(true);
+    expect(needsOrderFlowData("open")).toBe(false);
+    expect(needsOrderFlowData("close")).toBe(false);
+    expect(needsOrderFlowData("volume")).toBe(false);
+  });
+});
 
 describe("mirrorCond", () => {
   it("把大於換成小於、向上穿越換成向下穿越，巢狀結構不變", () => {

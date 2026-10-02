@@ -26,7 +26,13 @@ export interface Sizing {
   leverage: string;
 }
 
-export type PriceField = "open" | "high" | "low" | "close" | "volume";
+/**
+ * "trades"／"taker_buy_ratio" 需要 Bar.order_flow（成交筆數、主動買盤量）：
+ * 舊格式本機 K 線檔（6 欄）或還沒用 Phase I2 之後格式重新下載過的資料沒有這兩個欄位，
+ * 送出回測／模擬交易／測試網時後端會回傳明確錯誤（見
+ * docs/architecture/2026-10-02-bar-order-flow-fields.md §7.2），不是靜默當成 0。
+ */
+export type PriceField = "open" | "high" | "low" | "close" | "volume" | "trades" | "taker_buy_ratio";
 
 export type IndicatorName =
   | "sma"
