@@ -11,12 +11,13 @@
 //!   連續虧損筆數——不動已審查過的帳本結構（ADR 5.5 選項 a）。
 //! - [`event`]：觸發紀錄的型別。存結構化資料，顯示文字在讀取時才產生。
 //! - [`store`]：`<base_dir>/risk_events.json`，環形上限 [`store::MAX_RISK_EVENTS`] 筆。
+//! - [`gate`]：送單路徑上第二道閘門的**契約**（`PortfolioGate` / `GlobalBlocked`）。
+//!   沒有判斷邏輯，實作在 App 層（累加器在那裡）。
 //!
 //! # 現在刻意**沒有**什麼（都是後續的獨立步驟，不是忘了）
 //!
-//! - `GlobalLimits` / `GlobalBlocked` / `PortfolioGate`（ADR 第 4、8.1 節，落地第 1、3 步）。
-//! - 跟 `at-testnet-trading::Trader` 的實際串接（第 3 步）。那會動到已審查過的
-//!   money-critical crate，要走跨模型審查。
+//! - `GlobalLimits`（ADR 8.1，落地第 1 步）：單一幣種／總部位上限、價格偏離保護、
+//!   下單頻率上限、嚴格模式。[`gate`] 的 [`gate::PortfolioGate`] 只接了熔斷這一半。
 //! - 跨 session 的曝險加總（`aggregate_exposure`，ADR 8.2／8.3）。它依賴還不存在的
 //!   session registry，Phase B 完成後才有東西可加總。
 //! - App 層的 `EmergencyAction`（一鍵停止的兩種行為，ADR 第 6 節）。
@@ -84,6 +85,7 @@
 
 pub mod breaker;
 pub mod event;
+pub mod gate;
 mod serde_at;
 pub mod store;
 
@@ -93,4 +95,5 @@ pub use breaker::{
     MANDATORY_RULES,
 };
 pub use event::{ClockSource, RiskEvent, RiskEventCause};
+pub use gate::{GlobalBlocked, PortfolioGate};
 pub use store::{log_path, read_log, write_log, RiskEventLog, MAX_RISK_EVENTS};

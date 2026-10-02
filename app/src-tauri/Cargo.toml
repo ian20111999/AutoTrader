@@ -35,6 +35,7 @@ at-paper-trading = { path = "../../crates/paper-trading" }
 at-binance = { path = "../../crates/binance-client" }
 at-account-sync = { path = "../../crates/account-sync" }
 at-risk-control = { path = "../../crates/risk-control" }
+at-portfolio-risk = { path = "../../crates/portfolio-risk" }
 at-testnet-trading = { path = "../../crates/testnet-trading" }
 at-session-store = { path = "../../crates/session-store" }
 

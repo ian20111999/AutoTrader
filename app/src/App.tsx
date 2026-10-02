@@ -9,6 +9,7 @@ import { Backtest } from "./Backtest";
 import { Compare } from "./Compare";
 import { PaperTrading } from "./PaperTrading";
 import { TestnetTrading } from "./TestnetTrading";
+import { RiskControl } from "./RiskControl";
 import { Settings } from "./Settings";
 import { NAV_ITEMS, type PageId } from "./nav";
 import type { StrategyConfig } from "./strategyTypes";
@@ -105,6 +106,7 @@ function App() {
               onGoToStrategies={() => setPage("strategies")}
             />
           )}
+          {page === "riskControl" && <RiskControl />}
           {page === "settings" && <Settings />}
         </main>
       </div>

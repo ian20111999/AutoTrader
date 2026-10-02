@@ -1601,6 +1601,7 @@ a:hover {
    策略編輯器（Phase F3，積木式條件樹建構器）
    --------------------------------------------------------------------- */
 
+
 .strategy-editor {
   display: flex;
   flex-direction: column;
@@ -1833,4 +1834,116 @@ a:hover {
 .dsl-indicator__source {
   flex: 1 1 100%;
   margin-top: 6px;
+}
+
+/* ---- 風控頁（Risk） ---- */
+
+.risk-control {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* 設計稿是左右兩欄（左 1.1 : 右 1）；窄視窗收成一欄。 */
+.risk-control__columns {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .risk-control__columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.risk-control__column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.risk-control__hint {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.risk-control__rule {
+  padding: 10px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.risk-control__rule-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.risk-control__rule-condition {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.risk-control__rule-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.risk-control__switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.risk-control__pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.risk-control__pill--live {
+  border-color: var(--positive);
+  color: var(--positive);
+}
+
+.risk-control__pill--todo {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.risk-control__todo-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.risk-control__todo-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.risk-control__event-message {
+  font-size: 12px;
 }

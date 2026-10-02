@@ -27,6 +27,8 @@ export interface TestnetSnapshot {
 // Rust 端用 #[serde(tag = "type", rename_all = "camelCase")]。
 export type OrderOutcome =
   | { type: "blocked"; message: string }
+  // 全域風控（熔斷）擋下的，跟上面那個「這場自己的風控上限」是兩件事。
+  | { type: "globallyBlocked"; message: string }
   | { type: "invalid"; message: string }
   | {
       type: "filled";

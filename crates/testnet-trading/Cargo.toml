@@ -10,4 +10,5 @@ license.workspace = true
 at-binance = { path = "../binance-client" }
 at-core = { path = "../core" }
 at-market-stream = { path = "../market-stream" }
+at-portfolio-risk = { path = "../portfolio-risk" }
 at-risk-control = { path = "../risk-control" }

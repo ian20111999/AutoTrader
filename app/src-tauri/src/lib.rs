@@ -1,6 +1,7 @@
 mod account_permissions;
 mod backtest;
 mod paper_trading;
+mod risk_control;
 mod session_registry;
 mod sessions;
 mod settings;
@@ -15,6 +16,9 @@ use backtest::{
     validate_strategy_ast,
 };
 use paper_trading::{paper_trading_status, start_paper_trading, stop_paper_trading};
+use risk_control::{
+    get_breaker_rules, list_risk_events, risk_control_status, set_breaker_rule, RiskControlState,
+};
 use session_registry::SessionRegistry;
 use sessions::{
     delete_session, list_live_sessions, list_sessions, mark_session_saved, read_session_curve,
@@ -60,7 +64,7 @@ pub fn run() {
             // 一致），所以 registry／store 的 `.manage()` 放在 `setup` 裡，
             // 不是 `Builder::default()` 鏈的頂層。
             let base_dir = app.path().app_data_dir().expect("找不到應用程式資料目錄");
-            let store = Arc::new(at_session_store::SessionStore::new(base_dir));
+            let store = Arc::new(at_session_store::SessionStore::new(base_dir.clone()));
 
             // 啟動對帳（ADR §9.3）：把上次留下的孤兒 running 紀錄轉成
             // interrupted。對帳失敗不擋啟動——頂多是這次看到舊的孤兒紀錄，
@@ -79,6 +83,10 @@ pub fn run() {
 
             app.manage(store.clone());
             app.manage(SessionRegistry::new(store));
+            // 風控狀態（熔斷規則 + 觸發紀錄）跟 session store 同一個目錄，
+            // 而且要在任何 session 開始之前就存在：送單路徑拿到的閘門就是它
+            // 發出來的（見 `risk_control.rs` 的模組文件）。
+            app.manage(RiskControlState::new(base_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -107,7 +115,11 @@ pub fn run() {
             read_session_curve,
             mark_session_saved,
             delete_session,
-            session_store_health
+            session_store_health,
+            get_breaker_rules,
+            set_breaker_rule,
+            list_risk_events,
+            risk_control_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -41,11 +41,19 @@ describe("SideNav", () => {
     expect(onSelect).toHaveBeenCalledWith("strategyEditor");
   });
 
+  it("「風控」已接上頁面，點擊會觸發 onSelect", () => {
+    const onSelect = vi.fn();
+    render(<SideNav active="strategies" onSelect={onSelect} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /風控/ }));
+
+    expect(onSelect).toHaveBeenCalledWith("riskControl");
+  });
+
   it.each([
     "部署",
     "即時交易",
     "高頻監控",
-    "風控",
   ])("「%s」是 disabled 狀態，點了不會觸發 onSelect", (label) => {
     const onSelect = vi.fn();
     render(<SideNav active="strategies" onSelect={onSelect} />);

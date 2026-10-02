@@ -3,6 +3,19 @@
 //! 這裡沒有執行緒、沒有 channel、也沒有系統時鐘：時間由呼叫端傳進來
 //! （用 4.5 行情事件自帶的交易所時間），交易所由 [`OrderGateway`] 注入。
 //! 所以除了「真的連上測試網」以外的每一條分支都可以用普通的單元測試驗。
+//!
+//! # 兩道並列的閘門
+//!
+//! [`Trader::send_gated_order`] 依序呼叫兩道閘門，兩道都回 `Ok` 才送單
+//! （ADR-002 第 4.1 節）：
+//!
+//! 1. [`RiskLimits::check`]（6.3）：單一 session 的一鍵停止／單日虧損／單筆金額。
+//! 2. [`PortfolioGate::check`]（ADR-002）：全域熔斷。擋下時回
+//!    [`OrderOutcome::GloballyBlocked`]，和第一道的 [`OrderOutcome::Blocked`] 分開，
+//!    這樣「是哪一道閘門擋的」不會在轉成事件的路上消失。
+//!
+//! 順序只影響「擋下時回報哪一個理由」，不影響安不安全。先跑便宜的那道，而且
+//! 6.4 既有的擋單測試因此完全不受影響。
 
 use crate::{ConfigError, TestnetConfig, TradingError};
 use at_binance::testnet::{OrderResponse, OrderSide, OrderStatus};
@@ -10,6 +23,7 @@ use at_binance::BinanceError;
 use at_core::{
     Bar, EquityPoint, FeeModel, Fixed, Liquidity, RuleViolation, Side, Strategy, SymbolRules,
 };
+use at_portfolio_risk::{GlobalBlocked, PortfolioGate};
 use at_risk_control::{AccountState, Blocked, DailyPnl, ProposedOrder, RiskLimits};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,8 +63,13 @@ pub trait OrderGateway {
 /// 一根 K 線上「下單這件事」的結果。沒有這一則表示這根完全沒有要調倉。
 #[derive(Debug, Clone, PartialEq)]
 pub enum OrderOutcome {
-    /// 被風控閘門擋下（[`RiskLimits::check`]），這根不送單也不重試。
+    /// 被 session 內的風控閘門擋下（[`RiskLimits::check`]），這根不送單也不重試。
     Blocked(Blocked),
+    /// 被全域閘門擋下（[`PortfolioGate::check`]，熔斷），這根不送單也不重試。
+    ///
+    /// 和 [`OrderOutcome::Blocked`] 分成兩個 variant 而不是共用一個：觸發紀錄與
+    /// UI 都要知道是哪一道閘門擋的，塞進同一個 variant 會把這個資訊弄丟。
+    GloballyBlocked(GlobalBlocked),
     /// 算出來的單不符合交易所規則（數量級距、最小金額……），這根跳過。
     Invalid(RuleViolation),
     /// 真的送出去了，而且拿到終態回報。
@@ -98,12 +117,15 @@ pub struct TestnetSnapshot {
 
 /// 本地帳本 + 送單路徑。**這個型別裡只有一個地方會呼叫
 /// [`OrderGateway::place_market_order`]**（[`Trader::send_gated_order`]），
-/// 而那個地方的第一件事就是 [`RiskLimits::check`]。
+/// 而那個地方的前兩件事就是 [`RiskLimits::check`] 與 [`PortfolioGate::check`]。
 pub(crate) struct Trader {
     symbol: at_core::Symbol,
     rules: SymbolRules,
     fee_model: FeeModel,
     limits: RiskLimits,
+    /// 第二道閘門（全域熔斷）。**不是 `Option`**：型別上不存在「這條路沒有全域
+    /// 風控」的狀態（ADR 第 11 節第 10 項）。
+    gate: Arc<dyn PortfolioGate>,
     gateway: Box<dyn OrderGateway + Send>,
     kill_switch: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -122,6 +144,7 @@ impl Trader {
     pub(crate) fn new(
         config: &TestnetConfig,
         gateway: Box<dyn OrderGateway + Send>,
+        gate: Arc<dyn PortfolioGate>,
         kill_switch: Arc<AtomicBool>,
         stop: Arc<AtomicBool>,
     ) -> Result<Trader, ConfigError> {
@@ -139,6 +162,7 @@ impl Trader {
             rules: config.rules,
             fee_model,
             limits: config.limits,
+            gate,
             gateway,
             kill_switch,
             stop,
@@ -150,6 +174,15 @@ impl Trader {
             fees_paid: Fixed::ZERO,
             pnl: None,
         })
+    }
+
+    /// 把一則行情事件的交易所時間轉給全域閘門當心跳（「行情中斷」熔斷規則唯一的
+    /// 輸入，理由見 [`at_portfolio_risk::gate`] 的模組文件）。
+    ///
+    /// **未收盤的 K 線與 ticker 也要餵**：心跳是「這條連線還活著」，不是「又有一根
+    /// 收盤 K 線」。這裡不記帳、不下單、不碰策略。
+    pub(crate) fn observe_market_event(&self, at_ms: i64) {
+        self.gate.observe_market_event(at_ms);
     }
 
     /// 處理一根收盤 K 線。`now_ms` 是這根 K 線的交易所事件時間（UTC 毫秒）。
@@ -177,7 +210,7 @@ impl Trader {
             None => None,
             Some((side, qty)) => match self.rules.check(self.reference_price(side, price)?, qty) {
                 Err(violation) => Some(OrderOutcome::Invalid(violation)),
-                Ok(()) => Some(self.send_gated_order(side, qty, price, daily_pnl)?),
+                Ok(()) => Some(self.send_gated_order(side, qty, price, daily_pnl, now_ms)?),
             },
         };
 
@@ -292,14 +325,19 @@ impl Trader {
 
     /// **全專案唯一會送出訂單的函式。**
     ///
-    /// 第一件事就是過 [`RiskLimits::check`]；擋下就記一筆、回 `Blocked`，不重試、
-    /// 也不會往下走到 [`OrderGateway::place_market_order`]。
+    /// 前兩件事是過兩道閘門：[`RiskLimits::check`]（6.3）然後
+    /// [`PortfolioGate::check`]（全域熔斷）。任何一道擋下就記一筆、回對應的
+    /// `*Blocked`，不重試、也不會往下走到 [`OrderGateway::place_market_order`]。
+    ///
+    /// `now_ms` 是這根 K 線的交易所事件時間，原樣交給全域閘門——閘門的時間一定要
+    /// 和心跳同一個時鐘來源，所以這裡不自己讀時鐘、也不轉換。
     fn send_gated_order(
         &mut self,
         side: Side,
         qty: Fixed,
         price: Fixed,
         daily_pnl: Option<Fixed>,
+        now_ms: i64,
     ) -> Result<OrderOutcome, TradingError> {
         let state = AccountState {
             kill_switch: self.kill_switch.load(Ordering::Relaxed),
@@ -314,6 +352,12 @@ impl Trader {
         if let Err(blocked) = self.limits.check(&state, &order) {
             self.blocked += 1;
             return Ok(OrderOutcome::Blocked(blocked));
+        }
+        // 第二道閘門。擋下的理由（含「風控狀態讀不到」）一律當成「不送單」，
+        // 不是致命錯誤：什麼都還沒送出去，下一根 K 線仍然會被評估。
+        if let Err(blocked) = self.gate.check(now_ms) {
+            self.blocked += 1;
+            return Ok(OrderOutcome::GloballyBlocked(blocked));
         }
 
         let placed = self
@@ -494,6 +538,8 @@ fn to_order_side(side: Side) -> OrderSide {
 mod tests {
     use super::*;
     use at_core::{FeeSchedule, Symbol, TargetPosition};
+    use at_portfolio_risk::breaker::DEFAULT_CONSECUTIVE_LOSSES;
+    use at_portfolio_risk::{BreakerAction, BreakerTrip};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -655,22 +701,85 @@ mod tests {
         }
     }
 
+    /// 測試用的全域閘門：預設放行，記下每一次心跳與檢查，可以切換成擋單。
+    ///
+    /// 刻意不在 production 程式碼裡提供「永遠放行」的實作：那等於在 crate 裡放一條
+    /// 繞過全域風控的現成暗路。
+    #[derive(Default)]
+    struct FakeGate {
+        block_with: Mutex<Option<GlobalBlocked>>,
+        beats: Mutex<Vec<i64>>,
+        checks: Mutex<Vec<i64>>,
+    }
+
+    impl FakeGate {
+        fn allowing() -> Arc<FakeGate> {
+            Arc::new(FakeGate::default())
+        }
+
+        fn blocking(blocked: GlobalBlocked) -> Arc<FakeGate> {
+            let gate = FakeGate::default();
+            *gate.block_with.lock().unwrap() = Some(blocked);
+            Arc::new(gate)
+        }
+
+        fn checks(&self) -> Vec<i64> {
+            self.checks.lock().unwrap().clone()
+        }
+
+        fn beats(&self) -> Vec<i64> {
+            self.beats.lock().unwrap().clone()
+        }
+    }
+
+    impl PortfolioGate for FakeGate {
+        fn observe_market_event(&self, at_ms: i64) {
+            self.beats.lock().unwrap().push(at_ms);
+        }
+
+        fn check(&self, now_ms: i64) -> Result<(), GlobalBlocked> {
+            self.checks.lock().unwrap().push(now_ms);
+            match self.block_with.lock().unwrap().clone() {
+                Some(blocked) => Err(blocked),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn a_trip() -> BreakerTrip {
+        BreakerTrip {
+            trigger: DEFAULT_CONSECUTIVE_LOSSES,
+            action: BreakerAction::PauseStrategy,
+        }
+    }
+
     /// 建一個 [`Trader`]：退避表換成全 0，測試不用真的等。
     fn trader(
         config: &TestnetConfig,
         gateway: Arc<FakeExchange>,
     ) -> (Trader, Arc<AtomicBool>, Arc<AtomicBool>) {
+        let (trader, kill, stop, _gate) = trader_gated(config, gateway, FakeGate::allowing());
+        (trader, kill, stop)
+    }
+
+    /// 同上，但指定全域閘門，並把它一起回傳給測試斷言用。
+    fn trader_gated(
+        config: &TestnetConfig,
+        gateway: Arc<FakeExchange>,
+        gate: Arc<FakeGate>,
+    ) -> (Trader, Arc<AtomicBool>, Arc<AtomicBool>, Arc<FakeGate>) {
         let kill = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let mut trader = Trader::new(
             config,
             Box::new(gateway),
+            Arc::clone(&gate) as Arc<dyn PortfolioGate>,
             Arc::clone(&kill),
             Arc::clone(&stop),
         )
         .expect("設定應該合法");
         trader.backoff_ms = &[0, 0, 0];
-        (trader, kill, stop)
+        (trader, kill, stop, gate)
     }
 
     // ---- 設定檢查 ----
@@ -682,6 +791,7 @@ mod tests {
         let Err(error) = Trader::new(
             &config,
             Box::new(Arc::new(FakeExchange::default())),
+            FakeGate::allowing(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         ) else {
@@ -697,6 +807,7 @@ mod tests {
         let Err(error) = Trader::new(
             &config,
             Box::new(Arc::new(FakeExchange::default())),
+            FakeGate::allowing(),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         ) else {
@@ -989,6 +1100,169 @@ mod tests {
         );
         assert_eq!(snapshot.position, Fixed::ZERO);
         assert_eq!(snapshot.cash, fx("5000"));
+    }
+
+    // ---- 全域閘門（熔斷）----
+
+    #[test]
+    fn a_tripped_breaker_really_stops_the_order_from_being_sent() {
+        // 假交易所準備了一個「會成交」的回報：如果閘門沒擋，這張單就會送出去。
+        let gateway =
+            FakeExchange::with_place(response(OrderStatus::Filled, "99.9", "99.9", "9990"));
+        let config = config(fees());
+        let (mut trader, _kill, _stop, gate) = trader_gated(
+            &config,
+            Arc::clone(&gateway),
+            FakeGate::blocking(GlobalBlocked::BreakerTripped(a_trip())),
+        );
+        let mut strategy = Fixedly::new(TargetPosition::FULL_LONG);
+
+        let (outcome, snapshot) = trader
+            .on_closed_bar(&bar(0, "100"), T0 + MINUTE_MS, &mut strategy)
+            .expect("被擋下不是錯誤");
+
+        assert_eq!(
+            outcome,
+            Some(OrderOutcome::GloballyBlocked(
+                GlobalBlocked::BreakerTripped(a_trip())
+            )),
+            "熔斷擋下的單要回 GloballyBlocked，不能混進 6.3 的 Blocked"
+        );
+        assert!(
+            gateway.sent().is_empty(),
+            "熔斷觸發時絕對不可以有任何單被送出去"
+        );
+        assert_eq!(snapshot.blocked, 1, "被全域閘門擋下也要算進擋單次數");
+        assert_eq!(snapshot.position, Fixed::ZERO, "沒送單就不該有部位");
+        assert_eq!(snapshot.cash, fx("10000"), "沒送單就不該動現金");
+        assert_eq!(
+            gate.checks(),
+            vec![T0 + MINUTE_MS],
+            "閘門收到的時間必須是這根 K 線的交易所事件時間"
+        );
+        assert_eq!(
+            strategy.seen,
+            vec![T0],
+            "熔斷擋下送單，但策略還是要看到每一根 K 線"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_risk_state_fails_closed_and_blocks_the_order() {
+        // 「熔斷器自己壞掉」（鎖被毒化、累加器不存在）走的是同一條擋單路徑，
+        // 不是放行——這是 fail-closed 的核心斷言。
+        let gateway =
+            FakeExchange::with_place(response(OrderStatus::Filled, "99.9", "99.9", "9990"));
+        let config = config(fees());
+        let (mut trader, _kill, _stop, _gate) = trader_gated(
+            &config,
+            Arc::clone(&gateway),
+            FakeGate::blocking(GlobalBlocked::RiskStateUnavailable),
+        );
+        let mut strategy = Fixedly::new(TargetPosition::FULL_LONG);
+
+        let (outcome, snapshot) = trader
+            .on_closed_bar(&bar(0, "100"), T0 + MINUTE_MS, &mut strategy)
+            .expect("擋下不是致命錯誤：什麼都沒送出去");
+
+        assert_eq!(
+            outcome,
+            Some(OrderOutcome::GloballyBlocked(
+                GlobalBlocked::RiskStateUnavailable
+            ))
+        );
+        assert!(
+            gateway.sent().is_empty(),
+            "風控狀態讀不到時放行，等於風控從來沒存在過"
+        );
+        assert_eq!(snapshot.blocked, 1);
+    }
+
+    #[test]
+    fn an_armed_but_quiet_breaker_lets_the_order_through() {
+        // 對照組：同樣的設定、閘門放行，單就真的送出去——證明上面兩個測試擋下的
+        // 原因是閘門，不是別的東西。
+        let gateway =
+            FakeExchange::with_place(response(OrderStatus::Filled, "99.9", "99.9", "9990"));
+        let config = config(fees());
+        let (mut trader, _kill, _stop, gate) =
+            trader_gated(&config, Arc::clone(&gateway), FakeGate::allowing());
+        let mut strategy = Fixedly::new(TargetPosition::FULL_LONG);
+
+        let (outcome, snapshot) = trader
+            .on_closed_bar(&bar(0, "100"), T0 + MINUTE_MS, &mut strategy)
+            .expect("正常成交不該回錯誤");
+
+        assert!(
+            matches!(outcome, Some(OrderOutcome::Filled(_))),
+            "閘門放行時這張單應該真的送出去，實際是 {outcome:?}"
+        );
+        assert_eq!(
+            gateway.sent(),
+            vec![("BTCUSDT".to_string(), OrderSide::Buy, fx("99.9"))]
+        );
+        assert_eq!(snapshot.blocked, 0);
+        assert_eq!(gate.checks().len(), 1, "送單前必須問過閘門，而且只問一次");
+    }
+
+    #[test]
+    fn the_session_gate_speaks_first_when_both_gates_would_block() {
+        // 兩道閘門都會擋時，回報的是第一道的理由（ADR 4.1）：6.4 既有的擋單
+        // 測試因此完全不受這個改動影響。
+        let gateway = Arc::new(FakeExchange::default());
+        let config = config(fees());
+        let (mut trader, kill, _stop, gate) = trader_gated(
+            &config,
+            Arc::clone(&gateway),
+            FakeGate::blocking(GlobalBlocked::BreakerTripped(a_trip())),
+        );
+        kill.store(true, Ordering::Relaxed);
+        let mut strategy = Fixedly::new(TargetPosition::FULL_LONG);
+
+        let (outcome, snapshot) = trader
+            .on_closed_bar(&bar(0, "100"), T0 + MINUTE_MS, &mut strategy)
+            .expect("被擋下不是錯誤");
+
+        assert_eq!(outcome, Some(OrderOutcome::Blocked(Blocked::KillSwitch)));
+        assert!(gateway.sent().is_empty());
+        assert_eq!(snapshot.blocked, 1, "一張單被擋下只算一次");
+        assert!(
+            gate.checks().is_empty(),
+            "第一道閘門已經擋下，不需要也不該再問第二道"
+        );
+    }
+
+    #[test]
+    fn a_bar_that_needs_no_order_never_asks_the_gate() {
+        // 不用調倉的那根 K 線沒有「這筆單」可言，閘門不該被問（也不會因此記下
+        // 一筆沒發生過的檢查）。
+        let gateway = Arc::new(FakeExchange::default());
+        let config = config(fees());
+        let (mut trader, _kill, _stop, gate) =
+            trader_gated(&config, Arc::clone(&gateway), FakeGate::allowing());
+        let mut strategy = Fixedly::new(TargetPosition::FLAT);
+
+        trader
+            .on_closed_bar(&bar(0, "100"), T0 + MINUTE_MS, &mut strategy)
+            .expect("空手不送單");
+
+        assert!(gate.checks().is_empty());
+        assert!(gateway.sent().is_empty());
+    }
+
+    #[test]
+    fn a_market_event_is_forwarded_to_the_gate_as_a_heartbeat() {
+        let config = config(fees());
+        let (trader, _kill, _stop, gate) = trader_gated(
+            &config,
+            Arc::new(FakeExchange::default()),
+            FakeGate::allowing(),
+        );
+
+        trader.observe_market_event(T0 + 1_000);
+        trader.observe_market_event(T0 + 2_000);
+
+        assert_eq!(gate.beats(), vec![T0 + 1_000, T0 + 2_000]);
     }
 
     // ---- 等回報 ----

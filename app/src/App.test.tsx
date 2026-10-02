@@ -64,4 +64,14 @@ describe("App", () => {
     expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "正式環境 API 金鑰" })).toBeInTheDocument();
   });
+
+  it("點擊「風控」切換到風控頁，顯示熔斷規則與觸發紀錄", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /風控/ }));
+
+    expect(screen.getByRole("heading", { name: "風控" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "熔斷規則" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "觸發紀錄" })).toBeInTheDocument();
+  });
 });

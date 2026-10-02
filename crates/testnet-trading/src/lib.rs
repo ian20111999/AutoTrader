@@ -12,12 +12,20 @@
 //! 兩者共用的是**策略**（[`Strategy`]）、**型別**（[`Fixed`]、[`at_core::Bar`]、
 //! [`SymbolRules`]）和**只有收盤 K 線才處理**這個規則，不共用記帳引擎。
 //!
-//! # 唯一的送單路徑
+//! # 唯一的送單路徑、兩道並列的閘門
 //!
 //! 整個 crate 只有 `trader.rs` 的 `Trader::send_gated_order` 會呼叫
-//! [`OrderGateway::place_market_order`]，而它的第一件事就是
-//! [`RiskLimits::check`](at_risk_control::RiskLimits::check)。要繞過閘門送單，
-//! 必須改那個私有函式的前幾行——不存在「忘記檢查」的呼叫端。
+//! [`OrderGateway::place_market_order`]，而它的前兩件事是
+//! [`RiskLimits::check`](at_risk_control::RiskLimits::check)（6.3，單一 session）
+//! 與 [`PortfolioGate::check`](at_portfolio_risk::PortfolioGate::check)
+//! （ADR-002，全域熔斷）。兩道都回 `Ok` 才送單。要繞過閘門送單，必須改那個私有
+//! 函式的前幾行——不存在「忘記檢查」的呼叫端。
+//!
+//! 全域閘門是 [`spawn`] 的參數而**不是** `Option`：型別上沒有「這場交易沒有全域
+//! 風控」這個狀態。它的實作在 App 層（熔斷累加器要吃 [`TestnetUpdate`] 事件流），
+//! 而「行情中斷」規則要的心跳只有這裡的迴圈看得到，所以迴圈每收到一則行情事件
+//! （含未收盤 K 線與 ticker）就餵一次
+//! [`observe_market_event`](at_portfolio_risk::PortfolioGate::observe_market_event)。
 //!
 //! 送單對象是 6.2 的 [`BinanceTestnetClient`]，它連網址都寫死在常數裡，
 //! 型別上不可能指向正式環境。
@@ -71,8 +79,19 @@
 //! use at_binance::testnet::BinanceTestnetClient;
 //! use at_core::{FeeModel, FeeSchedule, Fixed, Interval, SmaCross, Symbol, SymbolRules};
 //! use at_market_stream::{kline_stream, spawn as spawn_stream};
+//! use at_portfolio_risk::{GlobalBlocked, PortfolioGate};
 //! use at_risk_control::RiskLimits;
 //! use at_testnet_trading::{spawn, TestnetConfig, TestnetUpdate};
+//! use std::sync::Arc;
+//!
+//! // 全域閘門：正式的實作在 App 層（`app/src-tauri/src/risk_control.rs`），它持有
+//! // 熔斷規則、累加器與觸發紀錄。這個範例用的是一個只為了讓程式碼編得起來的
+//! // 替身——**不要**把這種永遠放行的實作接到真的會送單的路徑上。
+//! struct ExampleGate;
+//! impl PortfolioGate for ExampleGate {
+//!     fn observe_market_event(&self, _at_ms: i64) {}
+//!     fn check(&self, _now_ms: i64) -> Result<(), GlobalBlocked> { Ok(()) }
+//! }
 //!
 //! let symbol = Symbol::new("BTCUSDT").unwrap();
 //! let mut fees = FeeSchedule::new();
@@ -109,7 +128,15 @@
 //! .unwrap();
 //!
 //! let stream = spawn_stream(kline_stream("BTCUSDT", Interval::M1));
-//! let live = spawn(stream, client, Box::new(strategy), &config, &warmup).unwrap();
+//! let live = spawn(
+//!     stream,
+//!     client,
+//!     Box::new(strategy),
+//!     &config,
+//!     &warmup,
+//!     Arc::new(ExampleGate),
+//! )
+//! .unwrap();
 //!
 //! // 一鍵停止：只擋送單，行情與快照繼續。
 //! live.set_kill_switch(true);
@@ -133,6 +160,7 @@ use at_binance::testnet::{BinanceTestnetClient, OrderResponse, OrderSide, OrderS
 use at_binance::BinanceError;
 use at_core::{FeeSchedule, Fixed, Strategy, Symbol, SymbolRules, WarmupBars};
 use at_market_stream::{MarketEvent, MarketStreamHandle};
+use at_portfolio_risk::PortfolioGate;
 use at_risk_control::RiskLimits;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -320,6 +348,7 @@ pub fn spawn(
     strategy: Box<dyn Strategy + Send>,
     config: &TestnetConfig,
     warmup: &WarmupBars,
+    gate: Arc<dyn PortfolioGate>,
 ) -> Result<TestnetTradingHandle, ConfigError> {
     let stop = stream.stop_flag();
     spawn_with(
@@ -329,6 +358,7 @@ pub fn spawn(
         strategy,
         config,
         warmup,
+        gate,
     )
 }
 
@@ -343,9 +373,16 @@ fn spawn_with(
     mut strategy: Box<dyn Strategy + Send>,
     config: &TestnetConfig,
     warmup: &WarmupBars,
+    gate: Arc<dyn PortfolioGate>,
 ) -> Result<TestnetTradingHandle, ConfigError> {
     let kill_switch = Arc::new(AtomicBool::new(false));
-    let mut trader = Trader::new(config, gateway, Arc::clone(&kill_switch), Arc::clone(&stop))?;
+    let mut trader = Trader::new(
+        config,
+        gateway,
+        gate,
+        Arc::clone(&kill_switch),
+        Arc::clone(&stop),
+    )?;
     // 設定先驗完再回放：設定是錯的就不該白跑一遍暖機。
     //
     // 回放在這裡（開執行緒之前）同步做完，所以「回放結束才開始交易」是結構上的
@@ -404,6 +441,17 @@ fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
+        // 心跳先餵給全域閘門，再決定這一則要不要處理：「行情中斷」熔斷規則要的是
+        // 「這條連線最後一次有聲音是什麼時候」，未收盤的 K 線與 ticker 同樣算
+        // （1 分鐘 K 線的收盤間隔遠大於 3 秒門檻，只拿收盤 K 線當心跳這條規則就
+        // 只剩兩種下場：永遠觸發，或門檻失去意義）。
+        //
+        // 用交易所給的事件時間，不讀本機時鐘——和閘門收到的 `now_ms` 必須同一個
+        // 時鐘來源，混用的話算出來的中斷時間是錯的。
+        match &event {
+            MarketEvent::Kline(update) => trader.observe_market_event(update.event_time_ms),
+            MarketEvent::Ticker(ticker) => trader.observe_market_event(ticker.event_time_ms),
+        }
         let MarketEvent::Kline(update) = event else {
             continue;
         };
@@ -446,6 +494,7 @@ mod tests {
     use super::*;
     use at_core::{Bar, FeeModel, Interval, TargetPosition};
     use at_market_stream::KlineUpdate;
+    use at_portfolio_risk::GlobalBlocked;
     use std::collections::VecDeque;
 
     fn fx(s: &str) -> Fixed {
@@ -551,6 +600,36 @@ mod tests {
         }
     }
 
+    /// 測試用的全域閘門：記下心跳、可以設定成擋單。
+    #[derive(Default)]
+    struct FakeGate {
+        block_with: Mutex<Option<GlobalBlocked>>,
+        beats: Mutex<Vec<i64>>,
+    }
+
+    impl FakeGate {
+        fn allowing() -> Arc<FakeGate> {
+            Arc::new(FakeGate::default())
+        }
+
+        fn beats(&self) -> Vec<i64> {
+            self.beats.lock().unwrap().clone()
+        }
+    }
+
+    impl PortfolioGate for FakeGate {
+        fn observe_market_event(&self, at_ms: i64) {
+            self.beats.lock().unwrap().push(at_ms);
+        }
+
+        fn check(&self, _now_ms: i64) -> Result<(), GlobalBlocked> {
+            match self.block_with.lock().unwrap().clone() {
+                Some(blocked) => Err(blocked),
+                None => Ok(()),
+            }
+        }
+    }
+
     /// 開一個真的 [`TestnetTradingHandle`]，行情來源是普通的 channel、
     /// 交易所是假的。回傳的 sender 要留著（drop 掉等於行情斷了）。
     #[allow(clippy::type_complexity)]
@@ -581,6 +660,26 @@ mod tests {
         Arc<Mutex<Vec<i64>>>,
         TestnetTradingHandle,
     ) {
+        let (tx, stop, gateway, seen, _gate, live) =
+            handle_gated(want, responses, warmup, FakeGate::allowing());
+        (tx, stop, gateway, seen, live)
+    }
+
+    /// 同上，但指定全域閘門，並把它一起回傳給測試斷言用。
+    #[allow(clippy::type_complexity)]
+    fn handle_gated(
+        want: TargetPosition,
+        responses: Vec<OrderResponse>,
+        warmup: &WarmupBars,
+        gate: Arc<FakeGate>,
+    ) -> (
+        mpsc::Sender<MarketEvent>,
+        Arc<AtomicBool>,
+        Arc<FakeExchange>,
+        Arc<Mutex<Vec<i64>>>,
+        Arc<FakeGate>,
+        TestnetTradingHandle,
+    ) {
         let (event_tx, event_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let gateway = Arc::new(FakeExchange::default());
@@ -597,9 +696,10 @@ mod tests {
             Box::new(strategy),
             &config(),
             warmup,
+            Arc::clone(&gate) as Arc<dyn PortfolioGate>,
         )
         .expect("設定應該合法");
-        (event_tx, stop, gateway, seen, live)
+        (event_tx, stop, gateway, seen, gate, live)
     }
 
     fn warmup_of(indexes: &[i64]) -> WarmupBars {
@@ -631,6 +731,7 @@ mod tests {
             }),
             &config,
             &warmup_of(&[0, 1]),
+            FakeGate::allowing(),
         )
         .err();
         assert_eq!(error, Some(ConfigError::NonPositiveCash));
@@ -709,6 +810,77 @@ mod tests {
     fn a_fresh_handle_has_no_snapshot_yet() {
         let (_events, _stop, _gateway, _seen, live) = handle(TargetPosition::FLAT, Vec::new());
         assert_eq!(live.latest_snapshot(), None);
+    }
+
+    // ---- 全域閘門：心跳與擋單 ----
+
+    #[test]
+    fn every_market_event_feeds_the_breaker_heartbeat_not_just_closed_bars() {
+        // 「行情中斷超過 3 秒」這條規則的輸入就是這串心跳。未收盤的 K 線與
+        // ticker 也算：只拿收盤 K 線當心跳的話，1 分鐘 K 線永遠看起來像中斷。
+        let (events, _stop, _gateway, seen, gate, live) = handle_gated(
+            TargetPosition::FLAT,
+            Vec::new(),
+            &WarmupBars::none(),
+            FakeGate::allowing(),
+        );
+        for event in [
+            kline(bar(0, "100"), false),
+            MarketEvent::Ticker(at_market_stream::TickerUpdate {
+                symbol: symbol(),
+                last_price: fx("101"),
+                event_time_ms: T0 + 10,
+            }),
+            kline(bar(0, "102"), true),
+        ] {
+            events.send(event).expect("測試 channel 不該關閉");
+        }
+
+        assert!(matches!(recv(&live), TestnetUpdate::Bar(_)));
+        assert_eq!(
+            gate.beats(),
+            vec![T0 + MINUTE_MS, T0 + 10, T0 + MINUTE_MS],
+            "三則行情事件都要餵心跳（未收盤 K 線、ticker、收盤 K 線）"
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![T0],
+            "心跳不影響「只有收盤 K 線才餵策略」"
+        );
+    }
+
+    #[test]
+    fn a_tripped_breaker_blocks_the_order_through_the_whole_loop() {
+        let gate = Arc::new(FakeGate::default());
+        *gate.block_with.lock().unwrap() = Some(GlobalBlocked::RiskStateUnavailable);
+        // 假交易所準備了一個會成交的回報：閘門沒擋住就會真的送出去。
+        let (events, _stop, gateway, _seen, _gate, live) = handle_gated(
+            TargetPosition::FULL_LONG,
+            vec![filled("99.9", "9990")],
+            &WarmupBars::none(),
+            gate,
+        );
+        events
+            .send(kline(bar(0, "100"), true))
+            .expect("測試 channel 不該關閉");
+
+        match recv(&live) {
+            TestnetUpdate::Order(OrderOutcome::GloballyBlocked(reason)) => {
+                assert_eq!(reason, GlobalBlocked::RiskStateUnavailable);
+            }
+            other => panic!("應該被全域閘門擋下，實際是 {other:?}"),
+        }
+        match recv(&live) {
+            TestnetUpdate::Bar(snapshot) => {
+                assert_eq!(snapshot.position, Fixed::ZERO);
+                assert_eq!(snapshot.blocked, 1);
+            }
+            other => panic!("擋下之後快照照常送出，實際是 {other:?}"),
+        }
+        assert!(
+            gateway.sent.lock().unwrap().is_empty(),
+            "熔斷／風控狀態不明時一張單都不可以送出去"
+        );
     }
 
     // ---- 一鍵停止 vs 停止：兩個獨立的開關 ----
@@ -994,6 +1166,10 @@ mod tests {
             // 沒有指標要收斂。真的要跑策略時用
             // `at_binance::market_data::recent_closed_bars` 抓。
             &WarmupBars::none(),
+            // 這條手動測試驗的是送單鏈本身，熔斷由 App 層的實作負責（它有自己的
+            // 測試）；這裡用放行的替身，否則第一根 K 線就會因為「還沒收到過行情
+            // 心跳」而被擋下，驗不到要驗的東西。
+            FakeGate::allowing(),
         )
         .expect("設定應該合法");
 

@@ -57,6 +57,7 @@ function strategySummary(strategy: StrategyInfo, values: Record<string, string>)
 function orderOutcomeMessage(outcome: OrderOutcome): string {
   switch (outcome.type) {
     case "blocked":
+    case "globallyBlocked":
     case "invalid":
       return outcome.message;
     case "filled":

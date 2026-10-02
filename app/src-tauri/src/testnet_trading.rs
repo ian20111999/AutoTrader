@@ -23,6 +23,7 @@
 //! 之後每場各自一把鎖，不會互相排隊（ADR §4.4：testnet 文件原本擔心的
 //! 全域鎖競爭在這個設計下不存在）。
 
+use crate::risk_control::RiskControlState;
 use crate::session_registry::{
     new_running_record, now_ms, LiveStatus, SessionControl, SessionEntry, SessionId, SessionMeta,
     SessionRegistry, SessionRegistryChangedEvent, SESSION_REGISTRY_CHANGED_EVENT,
@@ -103,6 +104,11 @@ pub enum OrderOutcomeDto {
     Blocked {
         message: String,
     },
+    /// 被全域風控（熔斷）擋下。和 `Blocked` 分開，使用者才看得出來這筆單是
+    /// 「這場的風控上限」擋的還是「整台機器的熔斷」擋的——兩者要做的事不一樣。
+    GloballyBlocked {
+        message: String,
+    },
     Invalid {
         message: String,
     },
@@ -121,6 +127,9 @@ impl From<OrderOutcome> for OrderOutcomeDto {
     fn from(outcome: OrderOutcome) -> Self {
         match outcome {
             OrderOutcome::Blocked(reason) => OrderOutcomeDto::Blocked {
+                message: reason.to_string(),
+            },
+            OrderOutcome::GloballyBlocked(reason) => OrderOutcomeDto::GloballyBlocked {
                 message: reason.to_string(),
             },
             OrderOutcome::Invalid(violation) => OrderOutcomeDto::Invalid {
@@ -318,6 +327,10 @@ fn finalize(
         },
     );
     registry.remove(&entry.id);
+    // 這場的熔斷累加器也收掉（不然每開一場就留一份）。帳戶層的暫停**不**跟著
+    // 消失：那是跨 session 的狀態，解除方式是確認交易所部位後重啟 App。
+    app.state::<RiskControlState>()
+        .close_session(entry.id.as_str());
 }
 
 /// 背景執行緒本體：逐則轉發成前端事件、順手更新 `LiveState`／
@@ -328,10 +341,15 @@ fn finalize(
 /// `Err(RecvTimeoutError::Disconnected)`，channel 關閉就結束這個執行緒。
 fn forward_updates(app: AppHandle, id: SessionId) {
     let registry = app.state::<SessionRegistry>();
+    let risk = app.state::<RiskControlState>();
     let entry = match registry.get(&id) {
         Some(entry) => entry,
         None => return,
     };
+    // 這場 session 的熔斷累加器（ADR §5.4：累加器在 App 層，因為事件流在這裡）。
+    // 拿不到的話不是「風控關掉」，而是送單路徑那一端會因為同一份狀態讀不到而
+    // 擋單——這裡只是沒有東西可以餵。
+    let breaker = risk.session(id.as_str());
     let mut last_snapshot: Option<TestnetSnapshotDto> = None;
 
     loop {
@@ -343,6 +361,20 @@ fn forward_updates(app: AppHandle, id: SessionId) {
         match received {
             Ok(update) => {
                 let event = to_event(&update);
+                // 先餵熔斷累加器再處理事件：下一根 K 線的送單前檢查要看到這一根的
+                // 結果（連續虧損筆數、權益高點、拒絕率都是從這串事件算出來的）。
+                if let Some(breaker) = &breaker {
+                    match &update {
+                        TestnetUpdate::Order(outcome) => breaker.record_order_outcome(outcome),
+                        TestnetUpdate::Bar(snapshot) => breaker.record_bar(
+                            snapshot.point.open_time,
+                            snapshot.position,
+                            snapshot.point.equity,
+                        ),
+                        TestnetUpdate::Failed(error) => breaker.record_failure(error),
+                        TestnetUpdate::Stopped => {}
+                    }
+                }
                 match &update {
                     TestnetUpdate::Order(_) => {
                         // 下單結果不改變執行狀態，只轉發事件，不動 LiveState/曲線。
@@ -481,10 +513,17 @@ pub fn start_testnet_trading(
         }
     };
 
-    let handle = match spawn_testnet(stream, client, strategy, &config, &warmup) {
+    // 熔斷閘門要在 spawn 之前就存在：送單路徑的第二道閘門是建構參數，不是之後
+    // 可以補上的東西（型別上沒有「這場沒有全域風控」的狀態）。
+    let breaker =
+        app.state::<RiskControlState>()
+            .open_session(id.as_str(), symbol.clone(), initial_cash);
+
+    let handle = match spawn_testnet(stream, client, strategy, &config, &warmup, breaker) {
         Ok(handle) => handle,
         Err(error) => {
             stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            app.state::<RiskControlState>().close_session(id.as_str());
             return Err(error.to_string());
         }
     };
@@ -518,6 +557,7 @@ pub fn start_testnet_trading(
                 handle.stop();
             }
         });
+        app.state::<RiskControlState>().close_session(id.as_str());
         return Err(err);
     }
 
