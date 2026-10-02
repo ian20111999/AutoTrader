@@ -773,6 +773,35 @@ a:hover {
   font-family: "JetBrains Mono", monospace;
 }
 
+.equity-compare-chart__sim {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.equity-compare-chart__backtest {
+  fill: none;
+  stroke: var(--positive);
+  stroke-width: 1.6;
+  stroke-dasharray: 5 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.equity-compare-chart__legend-sim {
+  fill: var(--accent);
+}
+
+.equity-compare-chart__legend-backtest {
+  fill: var(--positive);
+}
+
+.paper-trading-compare {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .backtest-result-actions {
   display: flex;
 }
