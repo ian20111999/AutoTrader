@@ -21,6 +21,11 @@
 //! sender 被 drop 而自然結束，執行緒退出時把自己從 `OrderBookState` 裡移除。
 //! 使用者忘記呼叫 `unsubscribe_order_book`（例如整個 App 關掉）也不會留下
 //! 連著網路的執行緒：那種情況下整個 process 本來就會跟著結束。
+//!
+//! 但「process 還活著、前端忘記取消訂閱」這個情況不能只靠前端的清理邏輯
+//! 永遠正確——[`OrderBookState::try_insert`] 有一個同時訂閱數上限
+//! （[`MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS`]），超過就直接擋下、不會
+//! 無限疊加背景執行緒跟 WebSocket 連線。
 
 use at_core::Fixed;
 use at_market_stream::{spawn_depth, DepthUpdate, MarketEvent, MarketStreamHandle};
@@ -34,11 +39,36 @@ use tauri::{AppHandle, Emitter, Manager};
 /// `app.emit` 用的事件名稱，前端用同一個字串 `listen`。
 const ORDER_BOOK_EVENT: &str = "order-book-update";
 
+/// 同時存在的委託簿訂閱上限。這份資料只是給人看的面板，沒有理由同時開超過
+/// 幾個；設上限是為了擋住「前端忘記呼叫 `unsubscribe_order_book`」這種情況
+/// 一路把背景執行緒跟 WebSocket 連線無限疊上去（每多一份訂閱就多一條長連線
+/// 執行緒，沒有後端自己的上限時，完全只靠前端的清理邏輯正確無誤才不會失控）。
+pub const MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS: usize = 10;
+
 /// 目前還活著的委託簿訂閱：`subscription_id` → 停止旗標。只存旗標，不存整個
 /// `MarketStreamHandle`——背景執行緒自己擁有 handle，`unsubscribe` 只需要
 /// 喊停，不需要搶執行緒手上的 channel。
 #[derive(Default)]
 pub struct OrderBookState(Mutex<HashMap<String, Arc<AtomicBool>>>);
+
+impl OrderBookState {
+    /// 登記一份新訂閱；超過 [`MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS`] 份時
+    /// 拒絕。檢查筆數跟寫入在同一次上鎖內完成（跟
+    /// [`crate::session_registry::SessionRegistry::insert`] 同一個理由：
+    /// 避免兩個幾乎同時送達的 subscribe 呼叫都通過檢查，讓實際訂閱數衝過
+    /// 上限）。
+    fn try_insert(&self, id: String, stop_flag: Arc<AtomicBool>) -> Result<(), String> {
+        let mut subscriptions = self.0.lock().unwrap();
+        if subscriptions.len() >= MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS {
+            return Err(format!(
+                "同時開啟的委託簿訂閱已達上限 {MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS} 份，\
+                 請先關閉其中幾個委託簿面板"
+            ));
+        }
+        subscriptions.insert(id, stop_flag);
+        Ok(())
+    }
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -107,11 +137,15 @@ pub fn subscribe_order_book(app: AppHandle, symbol: String, levels: u32) -> Resu
         crate::session_registry::now_ms()
     );
 
-    app.state::<OrderBookState>()
-        .0
-        .lock()
-        .unwrap()
-        .insert(subscription_id.clone(), stop_flag);
+    if let Err(err) = app
+        .state::<OrderBookState>()
+        .try_insert(subscription_id.clone(), stop_flag)
+    {
+        // 上限擋下來了：剛連上的這條連線要主動喊停，不能留著變成一條沒有
+        // 消費者在讀、也沒有登記在 `OrderBookState` 裡的孤兒連線。
+        handle.stop();
+        return Err(err);
+    }
 
     let app_for_thread = app.clone();
     let id_for_thread = subscription_id.clone();
@@ -244,6 +278,47 @@ mod tests {
         assert!(
             !state.0.lock().unwrap().contains_key("ob-btcusdt-1"),
             "移除後不該留在 map 裡，不然算孤兒訂閱"
+        );
+    }
+
+    #[test]
+    fn subscriptions_up_to_the_cap_all_succeed() {
+        let state = OrderBookState::default();
+        for i in 0..MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS {
+            state
+                .try_insert(format!("ob-{i}"), Arc::new(AtomicBool::new(false)))
+                .unwrap();
+        }
+        assert_eq!(
+            state.0.lock().unwrap().len(),
+            MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS
+        );
+    }
+
+    /// 這是「missing-rate-limit」/「resource-leak」這兩個 review 發現對應的
+    /// 回歸測試：沒有這個上限，重複呼叫 `subscribe_order_book`（不管是前端
+    /// bug 還是別的原因）可以無限疊加背景執行緒跟 WebSocket 連線。
+    #[test]
+    fn the_subscription_past_the_cap_is_rejected() {
+        let state = OrderBookState::default();
+        for i in 0..MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS {
+            state
+                .try_insert(format!("ob-{i}"), Arc::new(AtomicBool::new(false)))
+                .unwrap();
+        }
+
+        let err = state
+            .try_insert(
+                "ob-one-too-many".to_string(),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap_err();
+
+        assert!(err.contains(&MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS.to_string()));
+        assert_eq!(
+            state.0.lock().unwrap().len(),
+            MAX_CONCURRENT_ORDER_BOOK_SUBSCRIPTIONS,
+            "被拒絕的訂閱不該留下任何痕跡"
         );
     }
 }
