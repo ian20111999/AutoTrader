@@ -22,4 +22,9 @@ export interface StrategyInfo {
 export interface StrategyConfig {
   strategyId: string;
   values: Record<string, string>;
+  // strategyId === "custom" 時（Phase F3 積木編輯器送出的策略）才有值：整份
+  // DSL 策略（strategyDslTypes.ts 的 StrategyAst）序列化後的 JSON 字串，與
+  // 使用者在編輯器取的名字（畫面顯示用，不是 at_core 看得到的東西）。
+  dslJson?: string;
+  dslName?: string;
 }

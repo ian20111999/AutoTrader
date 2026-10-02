@@ -192,7 +192,7 @@ const CUSTOM_STRATEGY_NAME: &str = "自訂策略（DSL）";
 ///
 /// `compile()` 已經是信任邊界（節點數/深度/週期/位移/槓桿都在那裡驗證過），
 /// 這裡不另外做、也不繞過任何檢查，只負責把 `DslError` 轉成繁中錯誤字串。
-fn build_custom_strategy(dsl_json: &str) -> Result<at_core::CustomStrategy, String> {
+pub(crate) fn build_custom_strategy(dsl_json: &str) -> Result<at_core::CustomStrategy, String> {
     let ast: StrategyAst =
         serde_json::from_str(dsl_json).map_err(|e| format!("DSL JSON 格式錯誤：{e}"))?;
     ast.compile().map_err(|e| format!("自訂策略編譯失敗：{e}"))
@@ -206,6 +206,17 @@ pub(crate) fn strategy_display_name(strategy_id: &str) -> Result<String, String>
         .find(|info| info.id == strategy_id)
         .map(|info| info.name)
         .ok_or_else(|| format!("不支援的策略代號：{strategy_id}"))
+}
+
+/// [`strategy_display_name`] 的延伸：多認得 `CUSTOM_STRATEGY_ID`。
+/// `paper_trading.rs`（Phase F3）要顯示「這場 session 跑的是什麼策略」時也要
+/// 認得自訂策略，不只是回測頁，所以拉出來共用，不在兩個檔案各寫一份判斷。
+pub(crate) fn resolve_strategy_name(strategy_id: &str) -> Result<String, String> {
+    if strategy_id == CUSTOM_STRATEGY_ID {
+        Ok(CUSTOM_STRATEGY_NAME.to_string())
+    } else {
+        strategy_display_name(strategy_id)
+    }
 }
 
 /// [`validate_strategy_ast_command`] 的回傳：合不合法 + 錯誤訊息。

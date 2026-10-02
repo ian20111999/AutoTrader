@@ -153,8 +153,9 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
     if (effectiveSelectedId) localStorage.setItem(SESSION_ID_STORAGE_KEY, effectiveSelectedId);
   }, [effectiveSelectedId]);
 
+  const isCustomStrategy = strategyConfig?.strategyId === "custom";
   const selectedStrategy =
-    strategyConfig && strategies
+    strategyConfig && strategies && !isCustomStrategy
       ? (strategies.find((s) => s.id === strategyConfig.strategyId) ?? null)
       : null;
 
@@ -175,6 +176,7 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
       strategyId: strategyConfig.strategyId,
       params: strategyConfig.values,
       startingCapital: startingCapital.trim(),
+      dslJson: isCustomStrategy ? strategyConfig.dslJson ?? null : null,
     };
 
     setStarting(true);
@@ -208,9 +210,11 @@ export function PaperTrading({ strategyConfig, onGoToStrategies }: PaperTradingP
           <span className="backtest-form__label">策略</span>
           {strategyConfig ? (
             <p className="backtest-form__strategy">
-              {selectedStrategy
-                ? `${selectedStrategy.name}：${strategySummary(selectedStrategy, strategyConfig.values)}`
-                : "讀取策略資料中…"}
+              {isCustomStrategy
+                ? `${strategyConfig.dslName ?? "自訂策略（DSL）"}（積木編輯器）`
+                : selectedStrategy
+                  ? `${selectedStrategy.name}：${strategySummary(selectedStrategy, strategyConfig.values)}`
+                  : "讀取策略資料中…"}
             </p>
           ) : (
             <div role="alert" className="backtest-form__no-strategy">

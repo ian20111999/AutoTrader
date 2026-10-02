@@ -181,6 +181,7 @@ describe("PaperTrading", () => {
           strategyId: "sma_cross",
           params: { fastPeriod: "5", slowPeriod: "20" },
           startingCapital: "5000",
+          dslJson: null,
         },
       }),
     );

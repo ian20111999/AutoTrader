@@ -8,6 +8,9 @@ export interface StartPaperTradingRequest {
   strategyId: string;
   params: Record<string, string>;
   startingCapital: string;
+  // strategyId === "custom" 時（Phase F3 積木編輯器）才填：整份 DSL 策略
+  // （strategyDslTypes.ts 的 StrategyAst）序列化後的 JSON 字串。
+  dslJson?: string | null;
 }
 
 export interface PaperSnapshot {

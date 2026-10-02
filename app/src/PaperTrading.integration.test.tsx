@@ -71,6 +71,7 @@ describe("PaperTrading 整合測試（真正的 invoke/listen/emit，只換底�
         strategyId: "sma_cross",
         params: { fastPeriod: "5", slowPeriod: "20" },
         startingCapital: "10000",
+        dslJson: null,
       },
     });
     expect(await screen.findByRole("status")).toHaveTextContent("模擬交易執行中");

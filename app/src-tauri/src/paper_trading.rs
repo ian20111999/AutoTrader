@@ -56,6 +56,18 @@ pub struct StartPaperTradingRequest {
     pub strategy_id: String,
     pub params: HashMap<String, String>,
     pub starting_capital: String,
+    /// `strategy_id == "custom"`（Phase F3 積木編輯器）時，整份 DSL 策略的
+    /// JSON 字串；其他策略不用填。跟 `backtest.rs::BacktestRequest.dsl_json`
+    /// 同一個理由：不塞進 `params`，那是扁平的 key→字串參數表。
+    ///
+    /// 模擬交易目前只有現貨（`meta.market` 下面寫死 `Market::Spot`），所以
+    /// 送進來的自訂策略即使 `direction == long_short` 也編譯得過——
+    /// `CustomStrategy` 不知道執行層是現貨還是合約——但做空只有在合約才有
+    /// 意義。這裡不另外擋，由前端編輯器在 UI 層勸退（不送出 long_short 的
+    /// 策略去模擬交易），因為「現貨能不能做空」是執行層的事，不該讓這個
+    /// command 幫策略引擎做市場假設。
+    #[serde(default)]
+    pub dsl_json: Option<String>,
 }
 
 /// 一根收盤 K 線進帳本之後的完整狀態，數字用字串保留 `Fixed` 的精確表示
@@ -156,7 +168,16 @@ fn validate_request(
         // （見下方 start_paper_trading），會留下一條沒人管的孤兒連線。
         return Err("起始資金必須大於 0".to_string());
     }
-    let strategy = crate::backtest::build_strategy(&request.strategy_id, &request.params)?;
+    let strategy: Box<dyn Strategy + Send> =
+        if request.strategy_id == crate::backtest::CUSTOM_STRATEGY_ID {
+            let dsl_json = request
+                .dsl_json
+                .as_deref()
+                .ok_or_else(|| "自訂策略缺少 DSL JSON（dslJson）".to_string())?;
+            Box::new(crate::backtest::build_custom_strategy(dsl_json)?)
+        } else {
+            crate::backtest::build_strategy(&request.strategy_id, &request.params)?
+        };
     let config = BacktestConfig {
         fees: Some(FeeModel::spot_vip0()),
         slippage: crate::backtest::DEFAULT_SLIPPAGE,
@@ -330,7 +351,7 @@ pub fn start_paper_trading(
     request: StartPaperTradingRequest,
 ) -> Result<String, String> {
     let (symbol, interval, strategy, config) = validate_request(&request)?;
-    let strategy_name = crate::backtest::strategy_display_name(&request.strategy_id)?;
+    let strategy_name = crate::backtest::resolve_strategy_name(&request.strategy_id)?;
 
     let registry = app.state::<SessionRegistry>();
     let started_at_ms = now_ms();
@@ -537,6 +558,7 @@ mod tests {
             strategy_id: strategy_id.to_string(),
             params: param_map(params),
             starting_capital: starting_capital.to_string(),
+            dsl_json: None,
         }
     }
 

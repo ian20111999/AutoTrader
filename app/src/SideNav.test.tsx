@@ -29,8 +29,19 @@ describe("SideNav", () => {
     expect(onSelect).toHaveBeenCalledWith("overview");
   });
 
+  it("「策略編輯器」已接上頁面（Phase F3），點擊會觸發 onSelect", () => {
+    const onSelect = vi.fn();
+    render(<SideNav active="strategies" onSelect={onSelect} />);
+
+    const button = screen.getByRole("button", { name: /策略編輯器/ });
+    expect(button).not.toBeDisabled();
+
+    fireEvent.click(button);
+
+    expect(onSelect).toHaveBeenCalledWith("strategyEditor");
+  });
+
   it.each([
-    "策略編輯器",
     "部署",
     "即時交易",
     "高頻監控",

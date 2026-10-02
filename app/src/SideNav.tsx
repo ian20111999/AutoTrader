@@ -4,8 +4,9 @@ import { SIDE_NAV_GROUPS, type PageId } from "./nav";
 // 圖示照設計稿 SideNav.dc.html 的線條風格重繪（stroke-width 1.7、viewBox 24x24）。
 // 「比較」在設計稿裡沒有獨立的側邊導覽項目（是從總覽/回測頁連結過去的），
 // 這裡另外挑一個同風格的重疊圓圖示代表「比較」。
-// disabled 的項目（總覽/策略編輯器/部署/即時交易/高頻監控/風控）背後功能還沒做，
+// disabled 的項目（部署/即時交易/高頻監控/風控）背後功能還沒做，
 // 圖示先照設計稿分組邏輯挑同風格的線條圖代表，待功能做出來再換正式圖示。
+// 策略編輯器（Phase F3）已經接上頁面，不再 disabled。
 const ICONS: Record<string, ReactElement> = {
   overview: (
     <>

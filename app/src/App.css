@@ -1596,3 +1596,241 @@ a:hover {
 .overview-equity-chart__dot {
   fill: var(--accent);
 }
+
+/* ---------------------------------------------------------------------
+   策略編輯器（Phase F3，積木式條件樹建構器）
+   --------------------------------------------------------------------- */
+
+.strategy-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+  max-width: 920px;
+}
+
+.strategy-editor__topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+.strategy-editor__unsaved {
+  color: var(--accent);
+  font-size: 13px;
+  align-self: center;
+}
+
+.strategy-editor__hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.strategy-editor__trees {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.strategy-editor__short-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+.strategy-editor__validation {
+  font-size: 13px;
+}
+
+.strategy-editor__valid {
+  color: var(--positive);
+}
+
+.strategy-editor__invalid {
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
+.strategy-editor__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.strategy-editor__save-message {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.strategy-editor__preview {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--bg-panel);
+}
+
+.strategy-editor__preview-note {
+  margin: 0 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.strategy-editor__preview-metrics {
+  display: flex;
+  gap: 24px;
+}
+
+.strategy-editor__preview-metrics > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.strategy-editor__preview-label {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.strategy-editor__saved-list ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.strategy-editor__saved-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+
+.strategy-editor__saved-list li span {
+  flex: 1 1 auto;
+}
+
+.dsl-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.dsl-field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.dsl-field input,
+.dsl-field select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 6px 8px;
+}
+
+.dsl-cond {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-panel);
+  margin-top: 8px;
+}
+
+.dsl-cond__header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.dsl-cond__label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.dsl-cond__header select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 4px 6px;
+}
+
+.dsl-cond__remove {
+  margin-left: auto;
+}
+
+.dsl-cond__compare {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.dsl-cond__children {
+  display: flex;
+  flex-direction: column;
+}
+
+.dsl-cond__add {
+  margin-top: 8px;
+  align-self: flex-start;
+}
+
+.dsl-cond__sustained {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dsl-expr {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--bg-raised);
+  min-width: 220px;
+}
+
+.dsl-expr select,
+.dsl-expr input {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  padding: 4px 6px;
+}
+
+.dsl-expr__label {
+  flex: 1 1 100%;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.dsl-indicator {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.dsl-indicator__source {
+  flex: 1 1 100%;
+  margin-top: 6px;
+}

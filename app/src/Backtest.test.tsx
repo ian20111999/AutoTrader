@@ -184,6 +184,7 @@ describe("Backtest", () => {
           direction: "long_only",
           leverage: "1",
           marginMode: null,
+          dslJson: null,
         },
       }),
     );

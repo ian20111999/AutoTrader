@@ -4,6 +4,7 @@ import { SideNav } from "./SideNav";
 import { TopBar } from "./TopBar";
 import { Overview } from "./Overview";
 import { Strategies } from "./Strategies";
+import { StrategyEditor } from "./StrategyEditor";
 import { Backtest } from "./Backtest";
 import { Compare } from "./Compare";
 import { PaperTrading } from "./PaperTrading";
@@ -61,6 +62,18 @@ function App() {
               onNavigate={(target, config) => {
                 setStrategyConfig(config);
                 setPage(target);
+              }}
+            />
+          )}
+          {page === "strategyEditor" && (
+            <StrategyEditor
+              onUseInBacktest={(config) => {
+                setStrategyConfig(config);
+                setPage("backtest");
+              }}
+              onUseInPaperTrading={(config) => {
+                setStrategyConfig(config);
+                setPage("paperTrading");
               }}
             />
           )}
