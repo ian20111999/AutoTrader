@@ -1947,3 +1947,70 @@ a:hover {
 .risk-control__event-message {
   font-size: 12px;
 }
+
+.order-book-panel {
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.order-book-panel__header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.order-book-panel__disclaimer {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.order-book-panel__controls {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
+.order-book-panel__hint {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.order-book-panel__error {
+  color: var(--color-error, #c0392b);
+  font-size: 13px;
+}
+
+.order-book-panel__book {
+  display: flex;
+  gap: 16px;
+}
+
+.order-book-panel__side {
+  flex: 1;
+  min-width: 0;
+}
+
+.order-book-panel__side table {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.order-book-panel__side td {
+  padding: 2px 6px;
+  text-align: right;
+}
+
+.order-book-panel__price--ask {
+  color: var(--color-error, #c0392b);
+}
+
+.order-book-panel__price--bid {
+  color: var(--color-success, #27ae60);
+}

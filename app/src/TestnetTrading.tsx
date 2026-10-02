@@ -14,6 +14,7 @@ import { TESTNET_TRADING_EVENT } from "./testnetTradingTypes";
 import type { TestnetCredentialStatus } from "./testnetSettingsTypes";
 import { INTERVAL_OPTIONS } from "./backtestTypes";
 import { EquityCurveChart } from "./EquityCurveChart";
+import { OrderBookPanel } from "./OrderBookPanel";
 
 interface TestnetTradingProps {
   strategyConfig: StrategyConfig | null;
@@ -506,6 +507,8 @@ export function TestnetTrading({ strategyConfig, onGoToStrategies }: TestnetTrad
       </form>
 
       <div className="backtest-main">
+        {!fieldErrors.symbol && <OrderBookPanel symbol={symbol.trim()} />}
+
         {statusError && (
           <p role="alert" className="backtest-status backtest-status--error">
             讀取測試網交易狀態失敗：{statusError}

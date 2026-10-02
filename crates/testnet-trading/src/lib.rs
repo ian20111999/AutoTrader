@@ -451,6 +451,10 @@ fn run(
         match &event {
             MarketEvent::Kline(update) => trader.observe_market_event(update.event_time_ms),
             MarketEvent::Ticker(ticker) => trader.observe_market_event(ticker.event_time_ms),
+            // 這條迴圈訂閱的是 kline_stream，正式路徑不會收到委託簿事件；
+            // 委託簿是獨立、顯示用的訂閱（`order_book.rs`），刻意不接進交易
+            // 迴圈，也不當心跳用。
+            MarketEvent::Depth(_) => {}
         }
         let MarketEvent::Kline(update) = event else {
             continue;

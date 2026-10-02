@@ -1,5 +1,6 @@
 mod account_permissions;
 mod backtest;
+mod order_book;
 mod paper_trading;
 mod risk_control;
 mod session_registry;
@@ -15,6 +16,7 @@ use backtest::{
     run_backtest_command, run_buy_hold_baseline_command, run_parameter_sweep_command,
     validate_strategy_ast,
 };
+use order_book::{subscribe_order_book, unsubscribe_order_book, OrderBookState};
 use paper_trading::{paper_trading_status, start_paper_trading, stop_paper_trading};
 use risk_control::{
     get_breaker_rules, list_risk_events, risk_control_status, set_breaker_rule, RiskControlState,
@@ -87,6 +89,9 @@ pub fn run() {
             // 而且要在任何 session 開始之前就存在：送單路徑拿到的閘門就是它
             // 發出來的（見 `risk_control.rs` 的模組文件）。
             app.manage(RiskControlState::new(base_dir));
+            // 委託簿訂閱是獨立、可選的顯示用功能（不是交易 session），狀態
+            // 跟 session store/registry 無關，單純管理「哪些訂閱還活著」。
+            app.manage(OrderBookState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -119,7 +124,9 @@ pub fn run() {
             get_breaker_rules,
             set_breaker_rule,
             list_risk_events,
-            risk_control_status
+            risk_control_status,
+            subscribe_order_book,
+            unsubscribe_order_book
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

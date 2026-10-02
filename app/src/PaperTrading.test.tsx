@@ -214,7 +214,11 @@ describe("PaperTrading", () => {
 
     emit({ payload: { sessionId: SESSION_ID, type: "bar", snapshot: SNAPSHOT } });
 
-    expect(await screen.findByRole("region", { name: "模擬交易結果" })).toBeInTheDocument();
+    // 預設 1000ms 逾時在全套件平行跑（CPU 競爭重）時偶爾會剛好超時（曾實測
+    // 1032ms），拉長逾時不是放寬斷言、只是不讓測試本身的計時器變成另一個變數。
+    expect(
+      await screen.findByRole("region", { name: "模擬交易結果" }, { timeout: 5000 }),
+    ).toBeInTheDocument();
     expect(screen.getByText("10062.30")).toBeInTheDocument();
     expect(screen.getByText("0.1")).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
@@ -298,7 +302,9 @@ describe("PaperTrading", () => {
     render(<PaperTrading strategyConfig={STRATEGY_CONFIG} onGoToStrategies={vi.fn()} />);
 
     expect(await screen.findByRole("status")).toHaveTextContent("模擬交易執行中");
-    expect(await screen.findByRole("region", { name: "模擬交易結果" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("region", { name: "模擬交易結果" }, { timeout: 5000 }),
+    ).toBeInTheDocument();
     expect(screen.getByText("10062.30")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "停止模擬" })).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("paper_trading_status", { sessionId: SESSION_ID });

@@ -69,6 +69,30 @@ pub fn kline_stream(symbol: &str, interval: Interval) -> String {
     format!("{}@kline_{}", symbol.to_lowercase(), interval.as_str())
 }
 
+/// Binance partial book depth stream 只接受這三種深度檔數；傳其他值連上去
+/// Binance 會拒絕或行為不明，所以在組名字這一步就擋下來，不要連到一個
+/// 不合法的串流。查證來源：
+/// <https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams>
+/// 的 Partial Book Depth Streams 一節。
+const VALID_DEPTH_LEVELS: [u32; 3] = [5, 10, 20];
+
+/// 組出即時委託簿快照（partial book depth）串流的名字，給 [`spawn_depth`] 用。
+///
+/// 只支援 Binance 文件列出的三種檔數（5/10/20），其他值回 `Err`，不猜測、
+/// 不連到一個 Binance 行為不明的串流。
+///
+/// 範圍刻意只到這裡：partial depth 每次都是「前 N 檔的完整快照」，不需要
+/// 本地維護委託簿狀態，也不是 diff depth stream（那個需要抓 REST snapshot、
+/// 處理 `U`/`u`/`pu` 序號對齊，複雜度遠高於這次「給使用者看個大概」的需求）。
+pub fn depth_stream(symbol: &str, levels: u32) -> Result<String, String> {
+    if !VALID_DEPTH_LEVELS.contains(&levels) {
+        return Err(format!(
+            "不支援的委託簿深度檔數：{levels}（合法值：5、10、20）"
+        ));
+    }
+    Ok(format!("{}@depth{}", symbol.to_lowercase(), levels))
+}
+
 /// 一次即時價格更新（24hr ticker 串流的 `c` 欄位：最新成交價）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickerUpdate {
@@ -91,11 +115,30 @@ pub struct KlineUpdate {
     pub event_time_ms: i64,
 }
 
+/// 一次即時委託簿快照更新（partial book depth 串流：每則訊息都是前 N 檔的
+/// 完整快照，不是增量，呼叫端不需要、也不應該自己維護本地委託簿狀態）。
+///
+/// 只給使用者「看」用——不是回測資料（Binance 沒有歷史委託簿免費資料），
+/// 不接進任何策略/送單判斷。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DepthUpdate {
+    pub symbol: Symbol,
+    /// 買價由高到低；`(price, quantity)`。
+    pub bids: Vec<(Fixed, Fixed)>,
+    /// 賣價由低到高；`(price, quantity)`。
+    pub asks: Vec<(Fixed, Fixed)>,
+    /// ponytail: Binance 的 partial depth 訊息本身沒有時間戳欄位（跟
+    /// ticker/kline 不一樣），這裡填的是收到訊息那一刻的本機時間（UTC 毫秒），
+    /// 給前端顯示「資料多久以前更新」用，不是交易所產生事件的時間。
+    pub event_time_ms: i64,
+}
+
 /// 一則行情更新，[`spawn`] 回傳的 channel 送出的內容。
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarketEvent {
     Ticker(TickerUpdate),
     Kline(KlineUpdate),
+    Depth(DepthUpdate),
 }
 
 /// 連線或讀取這條串流失敗的原因。只用來決定「要不要重連」，訊息不含任何
@@ -267,6 +310,7 @@ fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) {
 /// 3. `connect` 這個 closure 自己決定不再重試（正式路徑不會，它永遠會重連）。
 fn run_with(
     mut connect: impl FnMut() -> Result<Box<dyn MessageSource>, StreamError>,
+    parse: impl Fn(&str) -> Option<MarketEvent>,
     sender: &mpsc::Sender<MarketEvent>,
     backoff: &mut Backoff,
     mut sleep: impl FnMut(Duration),
@@ -281,7 +325,7 @@ fn run_with(
                 }
                 match source.read_message() {
                     Ok(Some(text)) => {
-                        if let Some(event) = parse_event(&text) {
+                        if let Some(event) = parse(&text) {
                             if sender.send(event).is_err() {
                                 return;
                             }
@@ -329,6 +373,36 @@ impl MarketStreamHandle {
 /// 連上一條 Binance 公開行情串流（名字用 [`ticker_stream`] 或
 /// [`kline_stream`] 組），背景執行緒負責連線、解析訊息、斷線後指數退避重連。
 pub fn spawn(stream_name: impl Into<String>) -> MarketStreamHandle {
+    spawn_with(stream_name, parse_event)
+}
+
+/// 連上一條即時委託簿快照（partial book depth）串流（名字用 [`depth_stream`]
+/// 組，`levels` 不合法時這裡先回錯誤，不會去連一個 Binance 行為不明的串流）。
+///
+/// 跟 [`spawn`] 共用同一套連線管理邏輯（重連、退避、停止旗標），差異只在
+/// 解析訊息的方式：partial depth 的訊息本身不含交易對代號（跟 ticker/kline
+/// 不一樣），這裡用呼叫端已經知道的 `symbol` 把它填進每一筆 [`DepthUpdate`]。
+pub fn spawn_depth(symbol: &str, levels: u32) -> Result<MarketStreamHandle, String> {
+    let stream_name = depth_stream(symbol, levels)?;
+    let parsed_symbol = Symbol::new(symbol).map_err(|e| e.to_string())?;
+    Ok(spawn_with(stream_name, move |text: &str| {
+        parse_depth_event(text, parsed_symbol.clone(), now_ms())
+    }))
+}
+
+/// 現在的 UTC 毫秒時間，給 [`spawn_depth`] 標記每筆委託簿快照的接收時間。
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn spawn_with(
+    stream_name: impl Into<String>,
+    parse: impl Fn(&str) -> Option<MarketEvent> + Send + 'static,
+) -> MarketStreamHandle {
     let stream_name = stream_name.into();
     let (tx, rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
@@ -337,6 +411,7 @@ pub fn spawn(stream_name: impl Into<String>) -> MarketStreamHandle {
         let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
         run_with(
             || connect_real(&stream_name),
+            parse,
             &tx,
             &mut backoff,
             |delay| sleep_unless_stopped(delay, &worker_stop),
@@ -412,6 +487,46 @@ fn kline_event(raw: RawKlineEvent) -> Option<MarketEvent> {
     }))
 }
 
+/// Partial book depth 串流的訊息格式——跟 kline/ticker 不一樣，沒有 `"e"`
+/// 事件類型欄位，也沒有交易對代號，只有 `lastUpdateId` + 兩個 `[價格,數量]`
+/// 陣列。欄位語意來源：
+/// <https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams>
+/// 的 Partial Book Depth Streams 一節。
+#[derive(Debug, Deserialize)]
+struct RawDepthEvent {
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
+}
+
+fn parse_level(level: &[String; 2]) -> Option<(Fixed, Fixed)> {
+    Some((level[0].parse().ok()?, level[1].parse().ok()?))
+}
+
+/// 把一則 partial book depth 訊息解析成 [`MarketEvent::Depth`]。訊息裡沒有
+/// 交易對代號，`symbol` 是呼叫端（[`spawn_depth`]）已經知道、訂閱時指定的；
+/// `event_time_ms` 同理是呼叫端量到的接收時間，不是交易所時間（理由見
+/// [`DepthUpdate::event_time_ms`] 的文件）。看不懂的訊息（JSON 壞掉、欄位
+/// 對不上、數字格式不對）安靜回 `None`，跟 [`parse_event`] 同一個原則。
+fn parse_depth_event(text: &str, symbol: Symbol, event_time_ms: i64) -> Option<MarketEvent> {
+    let raw: RawDepthEvent = serde_json::from_str(text).ok()?;
+    let bids = raw
+        .bids
+        .iter()
+        .map(parse_level)
+        .collect::<Option<Vec<_>>>()?;
+    let asks = raw
+        .asks
+        .iter()
+        .map(parse_level)
+        .collect::<Option<Vec<_>>>()?;
+    Some(MarketEvent::Depth(DepthUpdate {
+        symbol,
+        bids,
+        asks,
+        event_time_ms,
+    }))
+}
+
 fn ticker_event(raw: RawTickerEvent) -> Option<MarketEvent> {
     let symbol = Symbol::new(&raw.s).ok()?;
     let last_price = raw.c.parse().ok()?;
@@ -455,6 +570,64 @@ mod tests {
         assert_eq!(kline_stream("BTCUSDT", Interval::M1), "btcusdt@kline_1m");
         assert_eq!(kline_stream("ethusdt", Interval::H4), "ethusdt@kline_4h");
         assert_eq!(kline_stream("BTCUSDT", Interval::S1), "btcusdt@kline_1s");
+    }
+
+    #[test]
+    fn depth_stream_accepts_the_binance_documented_levels() {
+        assert_eq!(depth_stream("BTCUSDT", 5).unwrap(), "btcusdt@depth5");
+        assert_eq!(depth_stream("BTCUSDT", 10).unwrap(), "btcusdt@depth10");
+        assert_eq!(depth_stream("ethusdt", 20).unwrap(), "ethusdt@depth20");
+    }
+
+    #[test]
+    fn depth_stream_rejects_an_unsupported_levels_value() {
+        let err = depth_stream("BTCUSDT", 7).unwrap_err();
+        assert!(err.contains('7'), "錯誤訊息要點出是哪個不合法的值：{err}");
+    }
+
+    // ---- 委託簿訊息解析：Binance 官方文件範例 ----
+    // <https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams>
+    // Partial Book Depth Streams 一節，範例原文：
+    // { "lastUpdateId": 160, "bids": [ [ "0.0024", "10" ] ], "asks": [ [ "0.0026", "100" ] ] }
+
+    const DEPTH_SNAPSHOT: &str = r#"{
+        "lastUpdateId": 160,
+        "bids": [["50000.00", "1.5"], ["49999.00", "2.0"]],
+        "asks": [["50001.00", "0.5"], ["50002.00", "3.0"]]
+    }"#;
+
+    #[test]
+    fn parses_a_depth_snapshot_with_symbol_and_time_injected_by_the_caller() {
+        let symbol = Symbol::new("BTCUSDT").unwrap();
+        let event = parse_depth_event(DEPTH_SNAPSHOT, symbol.clone(), 1_790_000_000_000)
+            .expect("應該解析成功");
+        let MarketEvent::Depth(d) = event else {
+            panic!("應該是 Depth 事件");
+        };
+        assert_eq!(d.symbol, symbol);
+        assert_eq!(d.event_time_ms, 1_790_000_000_000);
+        assert_eq!(
+            d.bids,
+            vec![(fx("50000.00"), fx("1.5")), (fx("49999.00"), fx("2.0"))]
+        );
+        assert_eq!(
+            d.asks,
+            vec![(fx("50001.00"), fx("0.5")), (fx("50002.00"), fx("3.0"))]
+        );
+    }
+
+    #[test]
+    fn malformed_depth_messages_are_skipped_not_panicking() {
+        let symbol = Symbol::new("BTCUSDT").unwrap();
+        assert_eq!(
+            parse_depth_event("not json at all", symbol.clone(), 0),
+            None
+        );
+        assert_eq!(
+            parse_depth_event(r#"{"bids":[],"asks":[["not-a-number","1"]]}"#, symbol, 0),
+            None,
+            "價格欄位不是合法數字時要安靜跳過，不能 panic"
+        );
     }
 
     // ---- 訊息解析：真實格式的片段（來自 Binance 官方文件範例，欄位補齊）----
@@ -644,6 +817,7 @@ mod tests {
                     }) as Box<dyn MessageSource>)
                 }
             },
+            parse_event,
             &tx,
             &mut backoff,
             |d| {
@@ -693,6 +867,7 @@ mod tests {
                     remaining: vec![Some(TICKER), None, None],
                 }) as Box<dyn MessageSource>)
             },
+            parse_event,
             &tx,
             &mut backoff,
             |d| {
@@ -752,6 +927,7 @@ mod tests {
             let mut backoff = Backoff::new(INITIAL_BACKOFF, MAX_BACKOFF);
             run_with(
                 || Ok(Box::new(AlwaysQuiet) as Box<dyn MessageSource>),
+                parse_event,
                 &tx,
                 &mut backoff,
                 |delay| sleep_unless_stopped(delay, &worker_stop),
