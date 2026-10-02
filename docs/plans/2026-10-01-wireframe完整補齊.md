@@ -136,8 +136,8 @@ AND/OR）。現有引擎的策略是 4 個寫死的 Rust 實作，只能調數�
 - [x] Phase D 模擬交易多策略並行
 - [x] Phase E 設計（architecture，ADR-002 portfolio-risk-engine）
 - [x] Phase E1 實作（at-portfolio-risk crate：熔斷規則引擎，已修復 fail-open-state-drift）
-- [ ] Phase E2 實作（獨立風控頁 UI + 把熔斷器接進 testnet-trading 實際送單路徑；
-  已實作完成，正在走 QA + Codex 交叉審查，審查過關後才 merge）
+- [x] Phase E2 實作（獨立風控頁 UI + 把熔斷器接進 testnet-trading 實際送單路徑；
+  QA + Codex 交叉審查皆為 0 個「必須修」，已 merge）
 - [x] Phase F 設計（architecture，ADR-003 strategy-dsl）
 - [x] Phase F1 Rust 執行引擎（strategy_dsl crate）
 - [x] Phase F2 Tauri 橋接（build_custom_strategy、validate_strategy_ast）
@@ -145,4 +145,25 @@ AND/OR）。現有引擎的策略是 4 個寫死的 Rust 實作，只能調數�
 - [x] Phase G 回測進階功能
 - [x] Phase H 策略庫 UI 強化
 
-剩餘：Phase E2（審查中）。其餘皆已 merge 進 main 並 push（最新：`f49e93b`）。
+全部完成，已 merge 進 main 並 push。
+
+## Phase E2 審查遺留的技術債（QA + Codex 一致同意：可合併，非阻擋項）
+
+1. **行情中斷規則只訂閱 `kline_stream`，沒訂閱 `ticker_stream` 當第二心跳源**
+   （QA 發現）。冷門交易對或測試網低流動期間有實際機率誤觸發「行情中斷 >3 秒」
+   熔斷（觸發後黏著、需重啟該場，不是資金風險，是可用性成本）。評估後發現這不是
+   「加一行訂閱」就能做：`at-market-stream` 的 `spawn()` 一次只接一條 Binance
+   原始串流（`/ws/<name>`），要同時接 kline+ticker 需要在該 crate 新增一個
+   「多條串流共用一個 channel」的能力（新執行緒 + 共用 stop flag + 共用
+   sender），這是一塊新能力、需要自己的測試與審查，不適合在這次審查週期裡順手加
+   進去。建議：另開一個小任務（`at-market-stream` 加 `spawn_multi`），完成後一樣
+   走 QA/Codex 審查再接線。
+2. **拒絕率歸屬靠 deque 位置（`orders.back_mut()`）而非顯式 id 比對**（QA、Codex
+   兩邊獨立發現同一個競態）。送單（`SessionBreaker::check` push `OrderRecord`）在
+   交易執行緒，標記拒絕（`record_order_outcome` 呼叫 `back_mut()`）在另一條轉送
+   執行緒，兩邊只靠時間假設對齊；理論上需要微秒級競態才會貼錯對象，效果是
+   「少算一筆拒絕」而非「風控被繞過」。正確修法需要讓 `PortfolioGate::check`
+   回傳一個序號、再讓這個序號跟著 `OrderOutcome`/`TestnetUpdate::Order` 一路傳到
+   轉送執行緒——這會改到已經審查過的 6.x 交易路徑的介面形狀（trait 方法簽名、
+   enum 欄位），改動範圍比它修的這個低機率問題更大，需要自己的審查週期，這次
+   不順手做。
