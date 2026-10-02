@@ -43,7 +43,9 @@ export type IndicatorName =
   | "atr"
   | "donchian"
   | "highest"
-  | "lowest";
+  | "lowest"
+  | "swing_high"
+  | "swing_low";
 
 /** bb 的多輸出選項。 */
 export type BbOutput = "upper" | "middle" | "lower";
@@ -51,6 +53,12 @@ export type BbOutput = "upper" | "middle" | "lower";
 export type MacdOutput = "line" | "signal" | "histogram";
 /** donchian 的多輸出選項。 */
 export type DonchianOutput = "high" | "low";
+/**
+ * swing_high／swing_low 的多輸出選項：
+ * - "last"：最近一個已確認的擺動點價位。
+ * - "previous"：上一個已確認的擺動點價位（BOS 公式②「HH > HH」要用這個）。
+ */
+export type SwingOutput = "last" | "previous";
 
 /**
  * 指標參數。用具名欄位而不是 Record<string, unknown>，跟 Rust 端的
@@ -60,6 +68,7 @@ export type DonchianOutput = "high" | "low";
  * - macd：吃 fast/slow/signal。
  * - bb：吃 period 與 mult（十進位字串）。
  * - donchian：只吃 period。
+ * - swing_high/swing_low：吃 left/right（左右各要看幾根才算確認）。
  */
 export interface IndicatorParams {
   period?: number;
@@ -68,6 +77,10 @@ export interface IndicatorParams {
   signal?: number;
   /** 布林通道的標準差倍數，十進位字串（如 "2"、"1.5"）。 */
   mult?: string;
+  /** swing_high／swing_low：左側要看幾根才算確認。 */
+  left?: number;
+  /** swing_high／swing_low：右側要看幾根才算確認（也是確認延遲）。 */
+  right?: number;
 }
 
 export type Expr =
@@ -88,8 +101,11 @@ export type Expr =
       /** 餵給指標的數列。省略 = 收盤價。atr／donchian 不接受這個欄位。 */
       source?: Expr;
       params: IndicatorParams;
-      /** 多輸出指標要選哪一路（bb/macd/donchian 必填，單輸出指標不可以填）。 */
-      output?: BbOutput | MacdOutput | DonchianOutput;
+      /**
+       * 多輸出指標要選哪一路（bb/macd/donchian/swing_high/swing_low 必填，
+       * 單輸出指標不可以填）。
+       */
+      output?: BbOutput | MacdOutput | DonchianOutput | SwingOutput;
       /** 取這個指標幾根之前的值。省略 = 0。上限 500。 */
       offset?: number;
     };

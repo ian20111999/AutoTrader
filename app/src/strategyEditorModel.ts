@@ -17,6 +17,7 @@ import {
   type MacdOutput,
   type PriceField,
   type StrategyAst,
+  type SwingOutput,
 } from "./strategyDslTypes";
 
 export function defaultExpr(): Expr {
@@ -40,6 +41,9 @@ export function defaultParamsFor(name: IndicatorName): IndicatorParams {
       return { period: 20, mult: "2" };
     case "rsi":
       return { period: 14 };
+    case "swing_high":
+    case "swing_low":
+      return { left: 2, right: 2 };
     default:
       return { period: 20 };
   }
@@ -47,7 +51,7 @@ export function defaultParamsFor(name: IndicatorName): IndicatorParams {
 
 export function defaultOutputFor(
   name: IndicatorName,
-): BbOutput | MacdOutput | DonchianOutput | undefined {
+): BbOutput | MacdOutput | DonchianOutput | SwingOutput | undefined {
   switch (name) {
     case "bb":
       return "middle";
@@ -55,24 +59,33 @@ export function defaultOutputFor(
       return "line";
     case "donchian":
       return "high";
+    case "swing_high":
+    case "swing_low":
+      return "last";
     default:
       return undefined;
   }
 }
 
-/** atr／donchian 吃整根 K 線，不接受 source（跟 compile() 的規則一致）。 */
+/**
+ * atr／donchian／swing_high／swing_low 吃整根 K 線，不接受 source
+ * （跟 compile() 的規則一致；swing 不接受 source 是正確性需求，見
+ * at_core::strategy_dsl::mod.rs 的說明：否則「左右各 N 根」會悄悄變成
+ * 「左右各 N 根有值的K線」）。
+ */
 export function indicatorTakesSource(name: IndicatorName): boolean {
-  return name !== "atr" && name !== "donchian";
+  return name !== "atr" && name !== "donchian" && name !== "swing_high" && name !== "swing_low";
 }
 
 export function needsOutput(name: IndicatorName): boolean {
-  return name === "bb" || name === "macd" || name === "donchian";
+  return name === "bb" || name === "macd" || name === "donchian" || name === "swing_high" || name === "swing_low";
 }
 
 export function outputOptionsFor(name: IndicatorName): string[] {
   if (name === "bb") return ["upper", "middle", "lower"];
   if (name === "macd") return ["line", "signal", "histogram"];
   if (name === "donchian") return ["high", "low"];
+  if (name === "swing_high" || name === "swing_low") return ["last", "previous"];
   return [];
 }
 
@@ -88,6 +101,12 @@ export function paramFieldsFor(name: IndicatorName): { key: keyof IndicatorParam
     return [
       { key: "period", label: "週期" },
       { key: "mult", label: "標準差倍數" },
+    ];
+  }
+  if (name === "swing_high" || name === "swing_low") {
+    return [
+      { key: "left", label: "左側根數" },
+      { key: "right", label: "右側根數（確認延遲）" },
     ];
   }
   return [{ key: "period", label: "週期" }];
@@ -117,7 +136,51 @@ const MIRROR_KIND: Partial<Record<string, string>> = {
   cross_below: "cross_above",
 };
 
-/** 做空條件預設鏡像多單：大於→小於、向上穿越→向下穿越，巢狀結構不變。 */
+/**
+ * 方向相反的價格欄位／指標配對：鏡像一個「多單看漲」的 Expr 時，這些要換成
+ * 它們的反方向版本，不只是翻轉比較運算子。
+ *
+ * - `high`／`low`：FVG 這種用影線表達的結構性訊號，鏡像時每一側的「上緣」要
+ *   變成「下緣」（`gt(low[0], high[2])` → `lt(high[0], low[2])`）。
+ * - `swing_high`／`swing_low`：同一個理由，BOS 用 `swing_high` 表達「創新高」，
+ *   鏡像後要變成 `swing_low`（「創新低」）。
+ *
+ * `sma`／`ema`／`rsi`／`open`／`close`／`volume` 等沒有方向對稱的概念，不在
+ * 這個表裡——鏡像時維持原樣（見 `strategyEditorModel.test.ts` 的既有測試）。
+ */
+const MIRROR_PRICE_FIELD: Partial<Record<PriceField, PriceField>> = {
+  high: "low",
+  low: "high",
+};
+
+const MIRROR_INDICATOR: Partial<Record<IndicatorName, IndicatorName>> = {
+  swing_high: "swing_low",
+  swing_low: "swing_high",
+};
+
+/**
+ * 鏡像一個數值節點本身的方向——**不交換 left／right 的位置**，只換每一側
+ * 自己的內容（既有陷阱：之前的 `mirrorCond()` 完全不碰 `Expr`，見
+ * ADR-004 第 10 節；FVG／BOS 這種左右兩側本來就不對稱的結構，光翻轉比較
+ * 運算子不夠，兩側各自的「方向」也要翻）。
+ */
+function mirrorExpr(expr: Expr): Expr {
+  if (expr.kind === "price") {
+    const field = MIRROR_PRICE_FIELD[expr.field] ?? expr.field;
+    return { ...expr, field };
+  }
+  if (expr.kind === "indicator") {
+    const name = MIRROR_INDICATOR[expr.name] ?? expr.name;
+    return { ...expr, name, source: expr.source ? mirrorExpr(expr.source) : expr.source };
+  }
+  return expr;
+}
+
+/**
+ * 做空條件預設鏡像多單：大於→小於、向上穿越→向下穿越，巢狀結構不變；
+ * `left`／`right` 兩側各自的 `Expr` 也要鏡像（見 `mirrorExpr`），不是只翻轉
+ * 運算子——否則 FVG／BOS 的做空版本會產生錯誤訊號（ADR-004 第 10 節）。
+ */
 export function mirrorCond(cond: Cond): Cond {
   switch (cond.kind) {
     case "all":
@@ -127,7 +190,12 @@ export function mirrorCond(cond: Cond): Cond {
       return { kind: "sustained", bars: cond.bars, inner: mirrorCond(cond.inner) };
     default: {
       const mirrored = MIRROR_KIND[cond.kind] ?? cond.kind;
-      return { ...cond, kind: mirrored } as Cond;
+      return {
+        ...cond,
+        kind: mirrored,
+        left: mirrorExpr(cond.left),
+        right: mirrorExpr(cond.right),
+      } as Cond;
     }
   }
 }

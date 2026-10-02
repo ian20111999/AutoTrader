@@ -34,7 +34,7 @@ use crate::strategies::Window;
 use crate::strategy::{Strategy, TargetPosition};
 use std::collections::VecDeque;
 
-use super::indicators::{Atr, Macd, MacdOutput, RsiCore, Smoothed};
+use super::indicators::{Atr, Macd, MacdOutput, PivotTracker, RsiCore, Smoothed, SwingOutput};
 
 /// 布林通道的三路輸出。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +87,16 @@ pub(super) enum IndicatorKind {
     Lowest {
         period: usize,
     },
+    SwingHigh {
+        left: usize,
+        right: usize,
+        output: SwingOutput,
+    },
+    SwingLow {
+        left: usize,
+        right: usize,
+        output: SwingOutput,
+    },
 }
 
 impl IndicatorKind {
@@ -103,6 +113,23 @@ impl IndicatorKind {
             IndicatorKind::Rsi { period } | IndicatorKind::Atr { period } => period + 1,
             // MACD 線從第 slow 根開始有值，訊號線是它的 EMA(signal)
             IndicatorKind::Macd { slow, signal, .. } => slow + signal - 1,
+            // ADR-004 §4.6：`output: last` 只要等到第一個候選點被右側確認；
+            // `output: previous` 要等到第二個擺動點也被確認——兩個擺動點的
+            // 最小間距是 min(left, right) + 1（不是 max：只有 d ≤ left 且
+            // d ≤ right 時才矛盾，`left=3, right=1` 時 `d=2` 合法）。
+            IndicatorKind::SwingHigh {
+                left,
+                right,
+                output,
+            }
+            | IndicatorKind::SwingLow {
+                left,
+                right,
+                output,
+            } => match output {
+                SwingOutput::Last => left + right + 1,
+                SwingOutput::Previous => left + right + left.min(right) + 2,
+            },
         }
     }
 }
@@ -246,6 +273,8 @@ enum IndicatorState {
         highs: Window,
         lows: Window,
     },
+    /// `swing_high`／`swing_low` 共用的狀態機，`higher` 決定找最大值還是最小值。
+    Pivot(PivotTracker),
 }
 
 /// 每個節點的狀態槽，和節點陣列等長、用 index 存取。
@@ -312,6 +341,12 @@ impl IndicatorState {
                 highs: Window::new(period),
                 lows: Window::new(period),
             },
+            IndicatorKind::SwingHigh { left, right, .. } => {
+                IndicatorState::Pivot(PivotTracker::new(left, right, true))
+            }
+            IndicatorKind::SwingLow { left, right, .. } => {
+                IndicatorState::Pivot(PivotTracker::new(left, right, false))
+            }
         }
     }
 }
@@ -609,6 +644,14 @@ fn step_indicator(
                 DonchianOutput::High => highs.highest(),
                 DonchianOutput::Low => lows.lowest(),
             }
+        }
+        (IndicatorState::Pivot(tracker), IndicatorKind::SwingHigh { output, .. }) => {
+            tracker.push(bar.high);
+            tracker.value(output)
+        }
+        (IndicatorState::Pivot(tracker), IndicatorKind::SwingLow { output, .. }) => {
+            tracker.push(bar.low);
+            tracker.value(output)
         }
         // 狀態與節點種類是一起建立的，不可能不配對；真的不配對就空手
         _ => None,

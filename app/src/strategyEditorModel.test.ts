@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { Cond } from "./strategyDslTypes";
 import {
   defaultAst,
   defaultCond,
@@ -46,6 +47,57 @@ describe("mirrorCond", () => {
         expect(second.inner.kind).toBe("lt");
       }
     }
+  });
+
+  // ADR-004 第 10 節：既有 bug——只翻轉運算子，不動 Expr 本身，會讓 FVG／BOS
+  // 的做空版本產生錯誤訊號。這兩個測試驗證「鏡像後語意正確」，不只是
+  // 「鏡像後能編譯」。
+  it("FVG 做多鏡像成做空：high/low 要互換，不是只翻轉運算子", () => {
+    // 做多 FVG：gt(low[0], high[2])
+    const longFvg: Cond = {
+      kind: "gt",
+      left: { kind: "price", field: "low", offset: 0 },
+      right: { kind: "price", field: "high", offset: 2 },
+    };
+    // 正確的做空版本（使用者直接手動組出來的）：lt(high[0], low[2])
+    const expectedShortFvg: Cond = {
+      kind: "lt",
+      left: { kind: "price", field: "high", offset: 0 },
+      right: { kind: "price", field: "low", offset: 2 },
+    };
+    expect(mirrorCond(longFvg)).toEqual(expectedShortFvg);
+  });
+
+  it("BOS 做多鏡像成做空：swing_high 要換成 swing_low，不是只翻轉運算子", () => {
+    // 做多 BOS（公式①）：gt(close, swing_high(last))
+    const longBos: Cond = {
+      kind: "gt",
+      left: { kind: "price", field: "close" },
+      right: {
+        kind: "indicator",
+        name: "swing_high",
+        params: { left: 2, right: 2 },
+        output: "last",
+      },
+    };
+    // 正確的做空版本：lt(close, swing_low(last))
+    const expectedShortBos: Cond = {
+      kind: "lt",
+      left: { kind: "price", field: "close" },
+      right: {
+        kind: "indicator",
+        name: "swing_low",
+        params: { left: 2, right: 2 },
+        output: "last",
+      },
+    };
+    expect(mirrorCond(longBos)).toEqual(expectedShortBos);
+  });
+
+  it("非方向性的指標（sma）鏡像時維持原樣，不受這次修復影響", () => {
+    const cond = defaultCond(); // gt(close, sma(10))
+    const mirrored = mirrorCond(cond);
+    expect(mirrored).toEqual({ kind: "lt", left: cond.left, right: cond.right });
   });
 });
 

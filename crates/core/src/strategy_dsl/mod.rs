@@ -69,7 +69,7 @@ pub use eval::CustomStrategy;
 
 use crate::fixed::Fixed;
 use eval::{BbOutput, DonchianOutput, IndicatorKind, Node, Roots};
-use indicators::MacdOutput;
+use indicators::{MacdOutput, SwingOutput};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -83,7 +83,10 @@ pub const MAX_DEPTH: usize = 32;
 /// 指標週期與 `sustained.bars` 的上限。
 ///
 /// `period` 直接決定 rolling window 的長度：512 節點 × 2000 × 8 bytes ≈ 8 MB，
-/// 這是記憶體用量的硬上限。
+/// 這是大部分指標的記憶體用量；`swing_high`／`swing_low` 的內部緩衝區是
+/// `left + right + 1` 個 `Fixed`（`left`、`right` 各受這個上限約束，最多
+/// 4001 個），512 節點 × 4001 × 8 bytes ≈ 16 MB，是全部指標合計的記憶體
+/// 用量硬上限（仍是常數級，不是結構性風險）。
 pub const MAX_PERIOD: u32 = 2000;
 /// 往前位移的根數上限。
 pub const MAX_OFFSET: u16 = 500;
@@ -207,6 +210,12 @@ pub enum IndicatorName {
     Highest,
     /// 視窗最小值。參數：`period`。
     Lowest,
+    /// 擺動高點（局部極大值，左右各 `left`／`right` 根都比它低才確認）。
+    /// 參數：`left`、`right`；`output` 必填（`last`／`previous`）。不接受 `source`。
+    SwingHigh,
+    /// 擺動低點（局部極小值，左右各 `left`／`right` 根都比它高才確認）。
+    /// 參數：`left`、`right`；`output` 必填（`last`／`previous`）。不接受 `source`。
+    SwingLow,
 }
 
 /// 指標參數。
@@ -237,6 +246,12 @@ pub struct IndicatorParams {
     /// 驗收核心。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mult: Option<String>,
+    /// `swing_high`／`swing_low` 的左側根數（左側要看幾根才算確認）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<u32>,
+    /// `swing_high`／`swing_low` 的右側根數（右側要看幾根才算確認，也是確認延遲）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<u32>,
 }
 
 /// 條件節點：求值結果是 `Option<bool>`，`None` 表示無法判定。
@@ -524,12 +539,22 @@ impl Compiler {
                 offset,
             } => {
                 check_offset(*offset, path)?;
-                // atr／donchian 吃整根 K 線，給 source 是使用者誤解了這個指標
-                let takes_whole_bar = matches!(name, IndicatorName::Atr | IndicatorName::Donchian);
+                // atr／donchian／swing_high／swing_low 吃整根 K 線，給 source 是
+                // 使用者誤解了這個指標（也是正確性需求，見 ADR-004 §4.4：
+                // 如果 swing 接受 source，「左右各 N 根」會悄悄變成「左右各 N 根
+                // 有值的K線」，根數跟真實K線序列脫鉚）。
+                let takes_whole_bar = matches!(
+                    name,
+                    IndicatorName::Atr
+                        | IndicatorName::Donchian
+                        | IndicatorName::SwingHigh
+                        | IndicatorName::SwingLow
+                );
                 if takes_whole_bar && source.is_some() {
                     return Err(err(
                         path,
-                        "atr 與 donchian 吃的是整根 K 線的高低收，不能指定 source",
+                        "atr、donchian、swing_high、swing_low 吃的是整根 K 線的高低收，\
+                         不能指定 source",
                     ));
                 }
                 let kind = indicator_kind(*name, params, output.as_deref(), path)?;
@@ -596,7 +621,12 @@ fn indicator_kind(
             Ok(IndicatorKind::Donchian { period, output })
         }
         IndicatorName::Bb => {
-            if params.fast.is_some() || params.slow.is_some() || params.signal.is_some() {
+            if params.fast.is_some()
+                || params.slow.is_some()
+                || params.signal.is_some()
+                || params.left.is_some()
+                || params.right.is_some()
+            {
                 return Err(err(path, "bb 只接受 period 與 mult 參數"));
             }
             let period = check_period(need(params.period, path, "period")?, path, "週期")?;
@@ -625,7 +655,11 @@ fn indicator_kind(
             })
         }
         IndicatorName::Macd => {
-            if params.period.is_some() || params.mult.is_some() {
+            if params.period.is_some()
+                || params.mult.is_some()
+                || params.left.is_some()
+                || params.right.is_some()
+            {
                 return Err(err(path, "macd 只接受 fast、slow、signal 三個參數"));
             }
             let fast = check_period(need(params.fast, path, "fast")?, path, "快線週期")?;
@@ -654,6 +688,42 @@ fn indicator_kind(
                 output,
             })
         }
+        IndicatorName::SwingHigh | IndicatorName::SwingLow => {
+            if params.period.is_some()
+                || params.fast.is_some()
+                || params.slow.is_some()
+                || params.signal.is_some()
+                || params.mult.is_some()
+            {
+                return Err(err(
+                    path,
+                    "swing_high／swing_low 只接受 left、right、output 參數",
+                ));
+            }
+            let left = check_period(need(params.left, path, "left")?, path, "左側根數")?;
+            let right = check_period(need(params.right, path, "right")?, path, "右側根數")?;
+            let output = pick_output(
+                output,
+                path,
+                "swing_high／swing_low",
+                &[
+                    ("last", SwingOutput::Last),
+                    ("previous", SwingOutput::Previous),
+                ],
+            )?;
+            Ok(match name {
+                IndicatorName::SwingHigh => IndicatorKind::SwingHigh {
+                    left,
+                    right,
+                    output,
+                },
+                _ => IndicatorKind::SwingLow {
+                    left,
+                    right,
+                    output,
+                },
+            })
+        }
     }
 }
 
@@ -663,6 +733,8 @@ fn only_period(params: &IndicatorParams, path: &str) -> Result<usize, DslError> 
         || params.slow.is_some()
         || params.signal.is_some()
         || params.mult.is_some()
+        || params.left.is_some()
+        || params.right.is_some()
     {
         return Err(err(path, "這個指標只接受 period 參數"));
     }

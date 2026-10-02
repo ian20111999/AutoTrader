@@ -20,6 +20,7 @@
 
 use crate::bar::Bar;
 use crate::fixed::Fixed;
+use std::collections::VecDeque;
 
 /// 有理數係數（α = `num`/`den`）的平滑平均。
 ///
@@ -289,6 +290,85 @@ fn abs(value: Fixed) -> Fixed {
     Fixed::from_raw(value.raw().checked_abs().unwrap_or(i64::MAX))
 }
 
+/// `swing_high`／`swing_low` 的兩路輸出（ADR-004 §4.2）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwingOutput {
+    /// 最近一個已確認的擺動點價位。
+    Last,
+    /// 上一個已確認的擺動點價位（`swing_high(last) > swing_high(previous)`
+    /// 這種「結構在創更高高點」寫法要用這個）。
+    Previous,
+}
+
+/// 擺動高低點（局部極值）的狀態機（ADR-004 §4）。
+///
+/// **語意是「最近一個已確認的擺動點價位」，不是「這一根是不是擺動點」。**
+/// 一根K線是不是擺動點，天生要等看到右側 `right` 根之後才能確定，所以這個
+/// 狀態機對最近 `right` 根不作任何宣稱——複用既有的 `Option::None`
+/// （和 ADR-003 訂單流欄位的「這個指標在某些情況下沒有意義」同一個模式），
+/// 不另外發明「待確認」狀態。
+///
+/// 兩側都是**嚴格**不等式（`>`／`<`，不是 `>=`/`<=`）：平盤序列永遠不會產生
+/// 擺動點（安全方向，跟既有「訊號矛盾／不明確時空手」的立場一致）。
+#[derive(Debug)]
+pub(crate) struct PivotTracker {
+    left: usize,
+    right: usize,
+    /// `true` = 找局部最大值（swing high），`false` = 找局部最小值（swing low）。
+    higher: bool,
+    /// 有界緩衝區，長度固定在 `left + right + 1`；候選點永遠是 `buf[left]`。
+    buf: VecDeque<Fixed>,
+    last: Option<Fixed>,
+    previous: Option<Fixed>,
+}
+
+impl PivotTracker {
+    pub(crate) fn new(left: usize, right: usize, higher: bool) -> PivotTracker {
+        PivotTracker {
+            left,
+            right,
+            higher,
+            buf: VecDeque::with_capacity(left + right + 1),
+            last: None,
+            previous: None,
+        }
+    }
+
+    /// 餵一根新值（`swing_high` 餵 `bar.high`，`swing_low` 餵 `bar.low`）。
+    pub(crate) fn push(&mut self, value: Fixed) {
+        let cap = self.left + self.right + 1;
+        self.buf.push_back(value);
+        if self.buf.len() > cap {
+            self.buf.pop_front();
+        }
+        if self.buf.len() < cap {
+            // 緩衝還沒滿，連第一個候選點都還看不到右側的根數
+            return;
+        }
+        let candidate = self.buf[self.left];
+        let is_pivot = self.buf.iter().enumerate().all(|(i, &v)| {
+            i == self.left
+                || if self.higher {
+                    candidate > v
+                } else {
+                    candidate < v
+                }
+        });
+        if is_pivot {
+            self.previous = self.last;
+            self.last = Some(candidate);
+        }
+    }
+
+    /// `output: last`／`output: previous` 共用的讀取入口。
+    pub(crate) fn value(&self, output: SwingOutput) -> Option<Fixed> {
+        match output {
+            SwingOutput::Last => self.last,
+            SwingOutput::Previous => self.previous,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +583,122 @@ mod tests {
         }
         // 不 panic 就算通過；值本身在這種輸入下沒有意義
         let _ = (atr.value(), macd.value(MacdOutput::Line), core.value());
+    }
+
+    // -----------------------------------------------------------------------
+    // PivotTracker（擺動高低點，ADR-004 §4／§9.4）
+    // -----------------------------------------------------------------------
+
+    fn push_all(tracker: &mut PivotTracker, values: &[&str]) {
+        for v in values {
+            tracker.push(fx(v));
+        }
+    }
+
+    #[test]
+    fn a_clear_local_maximum_is_detected_and_confirmed() {
+        // left=right=2：10,10,20,10,10 → 候選點 20 在左右各 2 根都比它低
+        let mut tracker = PivotTracker::new(2, 2, true);
+        push_all(&mut tracker, &["10", "10", "20", "10", "10"]);
+        assert_eq!(tracker.value(SwingOutput::Last), Some(fx("20")));
+    }
+
+    #[test]
+    fn a_pivot_is_none_until_the_right_side_confirms_it() {
+        // 同一組資料，逐根檢查：確認前（右側根數不足）必須是 None
+        let mut tracker = PivotTracker::new(2, 2, true);
+        let values = ["10", "10", "20", "10", "10"];
+        for (i, v) in values.iter().enumerate() {
+            tracker.push(fx(v));
+            let confirmed = i + 1 == values.len(); // 緩衝滿了才可能確認
+            if confirmed {
+                assert_eq!(
+                    tracker.value(SwingOutput::Last),
+                    Some(fx("20")),
+                    "第 {} 根",
+                    i + 1
+                );
+            } else {
+                assert_eq!(tracker.value(SwingOutput::Last), None, "第 {} 根", i + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn a_flat_sequence_never_produces_a_pivot() {
+        let mut tracker = PivotTracker::new(2, 2, true);
+        push_all(
+            &mut tracker,
+            &["10", "10", "10", "10", "10", "10", "10", "10"],
+        );
+        assert_eq!(tracker.value(SwingOutput::Last), None);
+
+        let mut low_tracker = PivotTracker::new(2, 2, false);
+        push_all(
+            &mut low_tracker,
+            &["10", "10", "10", "10", "10", "10", "10", "10"],
+        );
+        assert_eq!(low_tracker.value(SwingOutput::Last), None);
+    }
+
+    #[test]
+    fn last_and_previous_differ_once_two_pivots_are_confirmed() {
+        // 延續「暖機下界」那組測資：20 先確認，15 後確認
+        let mut tracker = PivotTracker::new(2, 2, true);
+        push_all(
+            &mut tracker,
+            &["10", "10", "20", "10", "10", "15", "10", "10"],
+        );
+        assert_eq!(tracker.value(SwingOutput::Last), Some(fx("15")));
+        assert_eq!(tracker.value(SwingOutput::Previous), Some(fx("20")));
+    }
+
+    #[test]
+    fn swing_low_uses_the_strictly_less_than_direction() {
+        let mut tracker = PivotTracker::new(1, 1, false);
+        push_all(&mut tracker, &["10", "5", "10"]);
+        assert_eq!(tracker.value(SwingOutput::Last), Some(fx("5")));
+    }
+
+    /// ADR-004 §4.6：`L=R=2` 時 `output: previous` 的暖機下界是 8 根——
+    /// 第 7 根之後還是 `None`，第 8 根之後才第一次有值（不是提早、也不是延後）。
+    #[test]
+    fn previous_output_warmup_lower_bound_is_tight_for_l_eq_r_eq_2() {
+        let mut tracker = PivotTracker::new(2, 2, true);
+        let values = ["10", "10", "20", "10", "10", "15", "10", "10"];
+        for (i, v) in values.iter().enumerate() {
+            tracker.push(fx(v));
+            if i + 1 < 8 {
+                assert_eq!(
+                    tracker.value(SwingOutput::Previous),
+                    None,
+                    "第 {} 根不該提早確認第二個擺動點",
+                    i + 1
+                );
+            }
+        }
+        assert_eq!(tracker.value(SwingOutput::Previous), Some(fx("20")));
+    }
+
+    /// ADR-004 §4.6：`L=3, R=1` 驗證暖機下界公式是 `min(left,right)`
+    /// 不是 `max(left,right)`——`min` 下的下界是 7 根，`max` 會錯誤地算成 9 根。
+    /// 這裡用「最緊」測資實測：第 6 根還是 `None`，第 7 根之後才第一次有值，
+    /// 證明 7 是真的下界、9 太保守。
+    #[test]
+    fn previous_output_warmup_lower_bound_uses_min_not_max_for_l3_r1() {
+        let mut tracker = PivotTracker::new(3, 1, true);
+        let values = ["10", "10", "10", "20", "10", "25", "10"];
+        for (i, v) in values.iter().enumerate() {
+            tracker.push(fx(v));
+            if i + 1 < 7 {
+                assert_eq!(
+                    tracker.value(SwingOutput::Previous),
+                    None,
+                    "第 {} 根不該提早確認第二個擺動點",
+                    i + 1
+                );
+            }
+        }
+        assert_eq!(tracker.value(SwingOutput::Previous), Some(fx("20")));
     }
 }

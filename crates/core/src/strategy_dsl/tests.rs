@@ -230,6 +230,262 @@ fn an_indicator_rejects_parameters_it_does_not_understand() {
     expect_error(entry, "只接受 period 參數");
 }
 
+// ---------------------------------------------------------------------------
+// swing_high／swing_low（ADR-004）
+// ---------------------------------------------------------------------------
+
+/// ADR-004 §8：三處參數拒絕清單（`only_period()`／`bb`／`macd`）都要擋住
+/// 混了 swing 專屬參數（`left`／`right`）的其他指標，不能靜默通過。
+#[test]
+fn swing_params_leaking_into_other_indicators_is_rejected() {
+    // only_period()：sma/ema/rsi/atr/highest/lowest 共用這個檢查
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"sma",
+                    "params":{"period":10,"left":3}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "只接受 period 參數");
+
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"sma",
+                    "params":{"period":10,"right":3}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "只接受 period 參數");
+
+    // bb
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"bb","output":"middle",
+                    "params":{"period":10,"mult":"2","left":3}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "bb 只接受 period 與 mult 參數");
+
+    // macd
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"macd","output":"line",
+                    "params":{"fast":12,"slow":26,"signal":9,"right":1}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "macd 只接受 fast、slow、signal 三個參數");
+}
+
+/// swing_high／swing_low 本身只接受 left、right、output，混了其他指標的
+/// 參數（例如 period）要被擋下來。
+#[test]
+fn swing_rejects_parameters_it_does_not_understand() {
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"last",
+                    "params":{"left":2,"right":2,"period":10}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "只接受 left、right、output 參數");
+}
+
+#[test]
+fn swing_rejects_a_source() {
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"last",
+                    "params":{"left":2,"right":2},
+                    "source":{"kind":"price","field":"close"}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "不能指定 source");
+}
+
+#[test]
+fn swing_output_must_be_explicit_and_valid() {
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high",
+                    "params":{"left":2,"right":2}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "output 必填");
+
+    let entry = r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"latest",
+                    "params":{"left":2,"right":2}},
+                    "right":{"kind":"number","value":"0"}}"#;
+    expect_error(entry, "不認得 output");
+}
+
+#[test]
+fn swing_high_detects_a_confirmed_local_maximum() {
+    // left=right=2：10,10,20,10,10 → 第 5 根起 swing_high(last) = 20
+    let mut strategy = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"last",
+            "params":{"left":2,"right":2}},
+            "right":{"kind":"number","value":"15"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    let bars = closes(&["10", "10", "20", "10", "10"]);
+    // 前 4 根緩衝未滿 → None → 空手；第 5 根確認 20 > 15 → 做多
+    assert_eq!(signals(&mut strategy, &bars), "....L");
+}
+
+#[test]
+fn swing_high_last_vs_previous_differ_once_two_pivots_confirm() {
+    // 出場用「同一個指標 ≤ 17」（entry 的互斥補集），這樣每一根只要指標有值
+    // 就能立刻看出訊號，不會被 hysteresis 蓋住觀察結果。
+    let entry_of = |output: &str| {
+        format!(
+            r#"{{"kind":"gt","left":{{"kind":"indicator","name":"swing_high","output":"{output}",
+                "params":{{"left":2,"right":2}}}},
+                "right":{{"kind":"number","value":"17"}}}}"#
+        )
+    };
+    let exit_of = |output: &str| {
+        format!(
+            r#"{{"kind":"lte","left":{{"kind":"indicator","name":"swing_high","output":"{output}",
+                "params":{{"left":2,"right":2}}}},
+                "right":{{"kind":"number","value":"17"}}}}"#
+        )
+    };
+    let bars = closes(&["10", "10", "20", "10", "10", "15", "10", "10"]);
+
+    // output: last → 第 5 根起是 20（>17），第 8 根變成 15（≤17）
+    let mut strategy = compile_long_only(&entry_of("last"), &exit_of("last")).unwrap();
+    assert_eq!(signals(&mut strategy, &bars), "....LLL.");
+
+    // output: previous → 要等第二個擺動點（15）才第一次有值（= 20），
+    // 第 8 根才第一次知道「previous」是什麼，20 > 17 → 做多
+    let mut strategy = compile_long_only(&entry_of("previous"), &exit_of("previous")).unwrap();
+    assert_eq!(signals(&mut strategy, &bars), ".......L");
+}
+
+/// ADR-004 §4.6：`output: previous` 的暖機下界透過 `compile()` 整條路徑驗證，
+/// `L=R=2` 是 8，`L=3,R=1` 是 7（驗證公式用的是 `min` 不是 `max`——`max` 會
+/// 錯誤地算成 9）。
+#[test]
+fn swing_previous_warmup_follows_the_min_formula_through_compile() {
+    let strategy = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"previous",
+            "params":{"left":2,"right":2}},
+            "right":{"kind":"number","value":"0"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    assert_eq!(strategy.warmup_bars(), 8);
+
+    let strategy = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"previous",
+            "params":{"left":3,"right":1}},
+            "right":{"kind":"number","value":"0"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    assert_eq!(
+        strategy.warmup_bars(),
+        7,
+        "min(3,1)+left+right+2 = 1+3+1+2 = 7"
+    );
+}
+
+/// 不接受 `source`，而且 `swing_high`／`swing_low` 歸入 `takes_whole_bar`，
+/// 所以不會像 `sma` 一樣多推一個預設的 `price(close)` 子節點——只攤平成 1 個節點。
+#[test]
+fn swing_does_not_expand_a_default_source_node() {
+    let strategy = compile_long_only(
+        r#"{"kind":"gt","left":{"kind":"indicator","name":"swing_high","output":"last",
+            "params":{"left":2,"right":2}},
+            "right":{"kind":"number","value":"0"}}"#,
+        NEVER,
+    )
+    .unwrap();
+    // 進場樹：gt + number(0) + swing_high = 3 個節點（不是 4，沒有多推預設的
+    // price(close) 來源節點）；出場樹（NEVER = price + number + lt）另外 3 個
+    assert_eq!(strategy.node_count(), 6);
+}
+
+/// ADR-004 §8：一個極端策略（多空各一棵用到 swing 的條件樹，約 40 個節點）
+/// 仍要在 `MAX_NODES`／`MAX_DEPTH` 內通過 `compile()`。
+#[test]
+fn an_extreme_strategy_using_swing_on_both_sides_still_compiles() {
+    const SWING_GT: &str = r#"{"kind":"gt",
+        "left":{"kind":"price","field":"close"},
+        "right":{"kind":"indicator","name":"swing_high","output":"last",
+                 "params":{"left":2,"right":2}}}"#;
+    const SWING_LT: &str = r#"{"kind":"lt",
+        "left":{"kind":"price","field":"close"},
+        "right":{"kind":"indicator","name":"swing_low","output":"last",
+                 "params":{"left":2,"right":2}}}"#;
+    let make_tree = |cond: &str, n: usize| -> String {
+        let children: Vec<String> = (0..n).map(|_| cond.to_string()).collect();
+        format!(r#"{{"kind":"all","children":[{}]}}"#, children.join(","))
+    };
+    let long_entry = make_tree(SWING_GT, 10);
+    let long_exit = make_tree(SWING_LT, 10);
+    let json = format!(
+        r#"{{"schemaVersion":1,"direction":"long_short",
+             "sizing":{{"positionPct":"100","leverage":"1"}},
+             "longEntry":{long_entry},"longExit":{long_exit},
+             "shortEntry":{},"shortExit":{}}}"#,
+        make_tree(SWING_LT, 10),
+        make_tree(SWING_GT, 10)
+    );
+    let strategy = parse(&json).compile().unwrap();
+    assert!(strategy.node_count() < MAX_NODES);
+    assert!(
+        strategy.node_count() > 30,
+        "要真的夠接近 §8 估的 ~40 個節點"
+    );
+}
+
+/// ADR-004 §9.4 第 10 條（最重要的驗收條件）：完整序列餵進去逐根求值的輸出，
+/// 必須跟「每次只餵一個遞增前綴（重新 compile、重新從頭跑）」逐根求值在共同
+/// 重疊的部分完全相等——結構性證明 `PivotTracker` 沒有偷看未來。
+///
+/// 如果 `PivotTracker::push` 偷看了還沒發生的K線（例如用 `right` 根*之後*的
+/// 資料去判斷*更早*那根的某個值，而不是只在緩衝滿了之後才回頭確認候選點），
+/// 這個測試會抓到：「只看到前 N 根」跑出來的第 i 根結果會跟「看到全部」跑出來
+/// 的第 i 根結果不一致。
+#[test]
+fn swing_evaluation_is_causal_full_sequence_matches_every_increasing_prefix() {
+    let entry = r#"{"kind":"gt","left":{"kind":"price","field":"close"},
+                    "right":{"kind":"indicator","name":"swing_high","output":"previous",
+                             "params":{"left":2,"right":3}}}"#;
+    let exit = r#"{"kind":"lt","left":{"kind":"price","field":"close"},
+                   "right":{"kind":"indicator","name":"swing_low","output":"last",
+                            "params":{"left":2,"right":3}}}"#;
+
+    let bars = wavy(80);
+
+    // 完整序列的逐根結果
+    let full: Vec<TargetPosition> = {
+        let mut strategy = compile_long_only(entry, exit).unwrap();
+        bars.iter().map(|bar| strategy.on_bar(bar)).collect()
+    };
+
+    // 每個遞增前綴：重新 compile、從頭跑，只取最後一根的結果
+    for prefix_len in 1..=bars.len() {
+        let mut strategy = compile_long_only(entry, exit).unwrap();
+        let mut last = TargetPosition::FLAT;
+        for bar in &bars[..prefix_len] {
+            last = strategy.on_bar(bar);
+        }
+        assert_eq!(
+            last,
+            full[prefix_len - 1],
+            "第 {prefix_len} 根：只看到前 {prefix_len} 根 K 線跑出來的結果，\
+             跟看到全部 80 根時第 {prefix_len} 根的結果不一致——代表偷看了未來"
+        );
+    }
+}
+
+/// ADR-004 §3／§6：FVG 與 BOS 都不需要任何引擎層新節點——這個測試直接用文件
+/// 給的 JSON 組合驗證「引擎 diff 是空的」這個結論是真的，不是假設。
+#[test]
+fn fvg_and_bos_compile_and_run_from_existing_nodes_alone() {
+    // 做多 FVG：low[0] > high[2]
+    let fvg_long = r#"{"kind":"gt","left":{"kind":"price","field":"low","offset":0},
+                       "right":{"kind":"price","field":"high","offset":2}}"#;
+    // 做多 BOS（公式①）：close > swing_high(last)
+    let bos_long = r#"{"kind":"gt","left":{"kind":"price","field":"close"},
+                       "right":{"kind":"indicator","name":"swing_high","output":"last",
+                                "params":{"left":2,"right":2}}}"#;
+    let entry = format!(r#"{{"kind":"all","children":[{bos_long},{fvg_long}]}}"#);
+    let mut strategy = compile_long_only(&entry, NEVER).unwrap();
+
+    // 建一段資料：先墊出一個 swing_high=20（10,10,20,10,10），然後製造一個
+    // FVG（low[t] > high[t-2]）且 close 突破 20。
+    let bars = closes(&[
+        "10", "10", "20", "10", "10", // 墊出 swing_high=20（第 5 根確認）
+        "10", "10", // high[t-2] 的參照點
+        "25", "25", "25", // low[0]=25 > high[2]=之前兩根的 high，且 close=25>20
+    ]);
+    let out = signals(&mut strategy, &bars);
+    assert!(
+        out.contains('L'),
+        "FVG + BOS 的組合條件要能真的觸發做多：{out}"
+    );
+}
+
 #[test]
 fn a_misspelled_parameter_is_rejected_by_serde() {
     let json = long_only(

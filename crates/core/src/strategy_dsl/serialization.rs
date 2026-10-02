@@ -185,3 +185,34 @@ fn a_bad_price_field_name_is_rejected() {
     let parsed: Result<Expr, _> = serde_json::from_str(r#"{"kind":"price","field":"Close"}"#);
     assert!(parsed.is_err(), "欄位名大小寫不同就是不同的東西");
 }
+
+/// ADR-004 §9.4：`swing_high`／`swing_low` 的 JSON `name` 字串要能正確
+/// 序列化／反序列化。
+#[test]
+fn swing_high_and_low_round_trip() {
+    for (name, output, json_name) in [
+        (IndicatorName::SwingHigh, "last", "swing_high"),
+        (IndicatorName::SwingLow, "previous", "swing_low"),
+    ] {
+        let expr = Expr::Indicator {
+            name,
+            source: None,
+            params: IndicatorParams {
+                left: Some(2),
+                right: Some(3),
+                ..Default::default()
+            },
+            output: Some(output.to_string()),
+            offset: 0,
+        };
+        let text = serde_json::to_string(&expr).unwrap();
+        assert!(
+            text.contains(&format!("\"name\":\"{json_name}\"")),
+            "{text}"
+        );
+        assert!(text.contains("\"left\":2"), "{text}");
+        assert!(text.contains("\"right\":3"), "{text}");
+        let back: Expr = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, expr, "來回一趟不可以改變任何東西");
+    }
+}
